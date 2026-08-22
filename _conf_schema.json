@@ -486,8 +486,9 @@
       },
       "ai_fallback_providers": {
         "type": "list",
-        "description": "AI 内容处理回退 Provider ID 列表",
-        "hint": "主 Provider 连续失败后按列表顺序切换；留空保持原有行为。手动填入 Provider ID（与 ai_provider_id 同格式，可在 AstrBot 服务商配置页查看）",
+        "_special": "select_providers",
+        "description": "AI 内容处理回退 Provider 列表",
+        "hint": "主 Provider 连续失败后按列表顺序切换；留空保持原有行为。可直接从已配置的对话 Provider 中多选，也可手动填写 Provider ID",
         "default": [],
         "items": {
           "type": "string"

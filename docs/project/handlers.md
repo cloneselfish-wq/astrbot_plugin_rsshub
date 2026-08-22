@@ -146,7 +146,7 @@ RSS 推送是持续型基础设施。AI provider 失败、超时、返回脏 JSO
 
 ### 回退 provider 链（fallback models）
 
-配置项 `content_handlers.ai_fallback_providers`（provider ID 列表，顺序即切换顺序）可为主模型加一层容错：候选链为 `[主 provider, *回退 provider]`，按顺序尝试。
+配置项 `content_handlers.ai_fallback_providers`（provider ID 列表，顺序即切换顺序）可为主模型加一层容错：候选链为 `[主 provider, *回退 provider]`，按顺序尝试。该配置在 AstrBot WebUI 中渲染为多选 provider 下拉（`_special: select_providers`，仅列出对话类 provider），也可手动填写 Provider ID；已手填的存量配置会原样回显。
 
 - 每个候选 provider 内部仍先做指数退避（最多 3 次）；**单 provider 连续失败**才切到下一个回退 provider，瞬时限流不会触发切换。
 - 回退链按 provider 身份去重；主 provider 解析失败（如配置的 `ai_provider_id` 不可用）时仍保留可用的回退项，避免单点配置错误让 filter/transform 整体失效。

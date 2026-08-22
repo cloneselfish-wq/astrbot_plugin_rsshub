@@ -10,10 +10,11 @@
   - 全部候选失败才记录 `error` trace 并照旧 fail-open，推送链路不阻断。
   - `scope=xml` 改写走 AstrBot agent runner（自带回退聊天模型链），不参与插件级切换。
   - 配置留空则完全保持 v2.2.0 行为（单主模型 + 退避重试）。
+  - 配置项使用 AstrBot `select_providers` 多选渲染：WebUI 里直接列出已配置的对话 provider 供勾选（按顺序保存），也可手动填写 Provider ID。
 
 ### Notes
 
-- 不新增聊天命令或 Web API；存量配置无需迁移（schema 自愈会自动补 `ai_fallback_providers: []`）。Provider ID 手动填入，与 `ai_provider_id` 同格式（可在 AstrBot 服务商配置页查看）。
+- 不新增聊天命令或 Web API；存量配置无需迁移（schema 自愈会自动补 `ai_fallback_providers: []`）。Provider ID 可从 AstrBot 服务商配置页查看，也可直接在插件配置页从已配置的对话 Provider 中多选；已手填 id 的存量配置会原样回显在所选列表中。
 
 ## [2.2.0] - 2026-08-22
 
