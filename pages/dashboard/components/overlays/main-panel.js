@@ -41,11 +41,12 @@ export const mainPanelTemplate = String.raw`
                 <option value="disabled">禁用全部处理链</option>
               </select>
             </div>
-            <div v-if="editForm.handlers_mode === 'override'" class="handler-json">
+            <div v-if="editForm.handlers_mode !== 'disabled'" class="handler-json">
               <textarea v-model="editForm.handlers_json" rows="10"></textarea>
               <button type="button" class="btn btn-secondary btn-small" @click="applyHandlersJson(editForm)">应用 JSON</button>
+              <div class="handler-hint" v-if="editForm.handlers_mode === 'inherit'">inherit 模式：留空回落到用户处理链，填入手写链则本订阅优先使用。</div>
             </div>
-            <div v-else class="handler-empty">{{ editForm.handlers_mode === 'inherit' ? '当前订阅继承用户处理链' : '当前订阅禁用全部处理链' }}</div>
+            <div v-else class="handler-empty">当前订阅禁用全部处理链</div>
           </div>
         </div>
         <div class="form-group">
@@ -122,6 +123,7 @@ export const mainPanelTemplate = String.raw`
       <div class="panel-section">
         <h4>基础信息</h4>
         <div class="detail-row"><span class="detail-label">状态</span><span class="detail-value"><span class="status-badge" :class="historyDetail.status">{{ historyDetail.status }}</span></span></div>
+        <div class="detail-row" v-if="historyLlmReason(historyDetail)"><span class="detail-label">LLM 判定</span><span class="detail-value cell-wrap llm-reason">{{ historyLlmReason(historyDetail) }}</span></div>
         <div class="detail-row"><span class="detail-label">来源</span><span class="detail-value">{{ historyDetail.source_type || 'feed' }} / {{ historyDetail.source_key || '-' }}</span></div>
         <div class="detail-row"><span class="detail-label">用户</span><span class="detail-value">{{ historyDetail.user_id }}</span></div>
         <div class="detail-row"><span class="detail-label">Feed</span><span class="detail-value">{{ historyDetail.feed_title || '-' }}</span></div>

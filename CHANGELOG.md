@@ -1,5 +1,48 @@
 # Changelog
 
+## [2.2.0] - 2026-08-22
+
+### Added
+
+- **推送历史展示 LLM 判定原因**：每条推送记录（含被 `ai_filter` 跳过、通知关闭、去重压制的）现在都会在 Web 面板"条目"列下方显示 LLM 判定原因（如"该推文包含演唱会票务情报，符合订阅要求"或"为合作直播回放宣传，非演唱会日程/票务/场贩信息"）；详情面板基础信息同步新增"LLM 判定"行。判定原因本就随 `handler_trace` 落库到每条记录，此前只藏在详情页调用链里，列表不可见；现在列表直接展示，方便排查"为什么这条被推送/被跳过"。`ai_filter` 解析失败时也会展示 `invalid json` 等标记。
+
+### Fixed
+
+- **分发异常不再丢失推送历史**：此前单个订阅在分发阶段抛出异常（用户装载失败、handler 配置损坏导致 `resolve_handlers` 报错、内容格式化异常等）时，只打日志、不写任何推送历史，LLM 判定原因随之丢失，排查"为什么没推/为什么推了"会断档。现在异常同样落一条 `status=failed` 的历史，`fail_reason` 带 `dispatch error: ` 前缀（与发送阶段失败区分），并保留已执行的 LLM 判定 `handler_trace`。该记录 `max_retries=0`，不会被自动失败队列重推；水位未确认，下一轮轮询会重新处理条目，无需自动重试本条。
+
+### Notes
+
+- 纯前端展示 + 异常审计记录补齐，不新增配置项、聊天命令或 Web API；已存在的历史记录无需迁移即可显示（数据原样在 `handler_trace` 里）。
+
+## [2.1.9] - 2026-08-21
+
+### Fixed
+
+- **AI 过滤经常"无效"的根因：模型输出带 Markdown 代码块或前后缀文字时被当成非法 JSON，直接放行**。此前 `ai_filter` 对输出做裸 `json.loads`，一旦模型用 ```json``` 围栏或带解释文字，解析失败就返回 `allow=true`（静默放行），推文实际没被判断过。现在：
+  - 新增容忍解析 `_extract_json_object`：自动剥离 Markdown 代码块、截取第一个 `{` 到最后一个 `}`、容忍前缀/尾随文字，对数组包裹也有效。
+  - 首次解析失败会**重试一次**，明确要求只返回 `{"allow":true,"reason":"..."}`。
+  - 过滤 prompt 显式要求"只返回一个 JSON 对象，不要输出解释、Markdown 或代码块"。
+  - `ai_transform` 的 JSON 解析也复用同一容忍解析，防御一致。
+  - 两次仍失败才放行（fail-open 保可用性），trace 里仍标记 `invalid json` / `empty response` 便于排查。
+
+### Notes
+
+- 本版本不新增配置项、聊天命令或 Web API。
+
+## [2.1.8] - 2026-08-21
+
+### Fixed
+
+- **继承模式下订阅自带 handlers 被忽略**：`handlers_mode=inherit`（默认值）此前始终使用用户级 handlers，导致每个群/订阅配的 AI 过滤与改写条件不生效。现在改为"订阅自带 handlers 优先，未配置时回落到用户级 handlers"，各组独立条件立即生效。
+- **Web 编辑保存会静默清空订阅 handlers**：`handleEditSub` 在非 `override` 模式下会向服务端发送 `handlers: []`，任何一次保存都可能把订阅已配置的 handlers 清空成空，表现为"改了之后 AI 过滤失效、测试推送不过滤不改写"。现在仅在 `override` 或编辑器内容确有改动时才发送 handlers 字段。
+- **缺少 `id` 的 handler 被静默丢弃**：前端 `normalizeHandlers` 与后端 `normalize_handlers` 会丢弃没有 `id` 字段的条目，粘贴 `[{"name":"ai_filter","config":{...}}]` 会被静默保存成 `[]`。现在缺 `id` 时用 `name` 自动生成（如 `builtin.ai_filter`，重名加后缀），前端与后端生成逻辑一致；`applyHandlersJson` 在丢弃条目时会给出警告。
+- **Web 编辑面板在 `inherit` 模式下隐藏 handler 编辑区**：因 inherit 现在可能使用订阅自带 handlers，编辑区改为 `inherit` 与 `override` 都显示（`disabled` 仍显示禁用提示），并补充 inherit 模式的行为说明。
+
+### Notes
+
+- 已存在订阅若 handlers 已被此前版本清空成 `[]`，需要重新在 Web 编辑面板填入；本版本起不会再被保存操作清空。
+- 本版本不新增配置项、聊天命令或 Web API。
+
 ## [2.1.4] - 2026-07-25
 
 ### Added

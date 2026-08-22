@@ -302,6 +302,7 @@ class RSSScheduler:
                 feed_id,
                 [sub.id for sub in due_subs],
                 notify_new_entries=True,
+                dispatch_to_all=True,
             )
             self._record_polling_result(result)
         except Exception as ex:

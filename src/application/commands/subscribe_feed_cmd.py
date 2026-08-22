@@ -76,6 +76,7 @@ class SubscribeFeedCommand:
         target_session: str | None = None,
         platform_name: str | None = None,
         session_defaults: dict[str, int | str] | None = None,
+        bot_self_id: str = "",
     ) -> CommandResult:
         """
         执行订阅命令
@@ -86,6 +87,7 @@ class SubscribeFeedCommand:
             target_session: 推送目标会话（可选）
             platform_name: 平台类型名（可选）
             session_defaults: 会话默认配置（可选）
+            bot_self_id: 订阅创建时所用 bot 的 self_id（合并转发节点身份，可选）
 
         Returns:
             CommandResult: 命令执行结果
@@ -204,6 +206,7 @@ class SubscribeFeedCommand:
             feed_id=feed.id,
             target_session=target_session,
             platform_name=platform_name,
+            bot_self_id=bot_self_id or "",
         )
         subscription = await self._subscription_repo.save(subscription)
 

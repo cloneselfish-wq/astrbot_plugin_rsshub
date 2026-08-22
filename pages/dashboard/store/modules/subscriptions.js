@@ -233,10 +233,15 @@ export const subscriptionsModule = {
       }
       options.length_limit = inheritedNumberToPayload(this.editForm.length_limit_control);
       options.handlers_mode = this.editForm.handlers_mode || 'inherit';
-      options.handlers =
-        options.handlers_mode === 'override'
-          ? buildHandlersFromEditorState(this.editForm)
-          : [];
+      // override 始终覆盖 handlers；inherit/disabled 仅在编辑器内容确实
+      // 被改动时才发送，避免任何一次保存把订阅自带 handlers 静默清空成 []。
+      const editorHandlers = buildHandlersFromEditorState(this.editForm);
+      const originalHandlers = this.editForm._originalHandlers || [];
+      const handlersChanged =
+        JSON.stringify(editorHandlers) !== JSON.stringify(originalHandlers);
+      if (options.handlers_mode === 'override' || handlersChanged) {
+        options.handlers = editorHandlers;
+      }
       options.state = this.editForm.state_ ? 1 : 0;
       options.notify = this.editForm.notify;
       options.send_mode = this.editForm.send_mode;

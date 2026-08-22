@@ -65,9 +65,19 @@ export const handlersModule = {
 
   applyHandlersJson(form) {
     try {
-      const normalized = normalizeHandlers(JSON.parse(form.handlers_json || '[]'));
+      const raw = JSON.parse(form.handlers_json || '[]');
+      if (!Array.isArray(raw)) throw new Error('必须是 JSON 数组');
+      const normalized = normalizeHandlers(raw);
       form.handlers_json = JSON.stringify(normalized, null, 2);
-      this.showToast('处理链 JSON 已应用');
+      const dropped = raw.length - normalized.length;
+      if (dropped > 0) {
+        this.showToast(
+          `处理链 JSON 已应用，但 ${dropped} 个条目因缺少 name 被丢弃`,
+          'error'
+        );
+      } else {
+        this.showToast('处理链 JSON 已应用');
+      }
     } catch (err) {
       this.showToast(`处理链 JSON 格式错误: ${err.message}`, 'error');
     }

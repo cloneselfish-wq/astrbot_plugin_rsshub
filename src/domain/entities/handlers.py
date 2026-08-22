@@ -308,6 +308,17 @@ def _coerce_handler_config_value(
     return value
 
 
+def _generate_handler_id(name: str, handler_type: str, seen_ids: set[str]) -> str:
+    """为缺少 id 的 handler 生成稳定 id（前端 helpers.js 与之保持一致）。"""
+    base = f"builtin.{name}" if handler_type == "builtin" else name
+    candidate = base
+    suffix = 2
+    while candidate in seen_ids:
+        candidate = f"{base}.{suffix}"
+        suffix += 1
+    return candidate
+
+
 def normalize_handlers(value: Any) -> list[HandlerSpec]:
     """Normalize stored handler payload to validated list."""
     if value is None or value == "":
@@ -331,8 +342,18 @@ def normalize_handlers(value: Any) -> list[HandlerSpec]:
     for item in payload:
         if not isinstance(item, dict):
             continue
+        raw = dict(item)
+        name = str(raw.get("name", "") or "").strip()
+        if not name:
+            continue
+        # id 缺失时由 name 生成，避免粘贴的 handler 被静默丢弃
+        if not str(raw.get("id", "") or "").strip():
+            handler_type = (
+                str(raw.get("type", "") or "").strip().lower() or HandlerType.BUILTIN.value
+            )
+            raw["id"] = _generate_handler_id(name, handler_type, seen_ids)
         try:
-            spec = HandlerSpec.model_validate(item).normalized()
+            spec = HandlerSpec.model_validate(raw).normalized()
         except Exception:
             continue
         if not spec.id or not spec.name or spec.id in seen_ids:

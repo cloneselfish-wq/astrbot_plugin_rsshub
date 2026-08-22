@@ -78,6 +78,55 @@ def test_bot_self_id_provider_returns_only_a_unique_connected_account(monkeypatc
     assert self_id_provider("aiocqhttp") == ""
 
 
+def test_bot_self_id_provider_detects_multiple_instances_on_same_platform(monkeypatch):
+    """同一平台多个适配器实例（每个 bot 一个）时，self_id 必须返回空串，
+    否则合并转发节点会写入 bot1 的 uin，导致消息显示为从 bot1 伪造转发。"""
+    providers: dict[str, object] = {}
+
+    class FakePlatform:
+        def __init__(self, self_id: str):
+            self._client = SimpleNamespace(_wsr_api_clients={self_id: object()})
+
+        def meta(self):
+            return SimpleNamespace(name="aiocqhttp")
+
+        def get_client(self):
+            return self._client
+
+    class FakePlatformManager:
+        def __init__(self, platforms: list[FakePlatform]):
+            self._platforms = platforms
+
+        def get_insts(self):
+            return self._platforms
+
+    monkeypatch.setattr(
+        bootstrap,
+        "set_bot_client_provider",
+        lambda provider: providers.__setitem__("client", provider),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "set_bot_self_id_provider",
+        lambda provider: providers.__setitem__("self_id", provider),
+    )
+
+    context = SimpleNamespace(
+        platform_manager=FakePlatformManager(
+            [
+                FakePlatform("123456789"),
+                FakePlatform("987654321"),
+                FakePlatform("555555555"),
+            ]
+        )
+    )
+    bootstrap._register_bot_client_provider(context)
+
+    self_id_provider = providers["self_id"]
+    assert callable(self_id_provider)
+    assert self_id_provider("aiocqhttp") == ""
+
+
 def test_init_config_heals_dirty_astrbot_config_before_parsing(monkeypatch):
     schema = {
         "basic_config": {

@@ -20,6 +20,7 @@ class MessageContext:
     send_mode: int | None = None
     style: int = 0
     sender_strategy: Any = None
+    bot_self_id: str = ""  # 订阅创建时所用 bot 的 self_id（合并转发节点身份）
 
 
 @dataclass(frozen=True)

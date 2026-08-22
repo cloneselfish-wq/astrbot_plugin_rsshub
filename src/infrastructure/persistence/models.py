@@ -137,6 +137,11 @@ class SubORM(RSSHubBaseModel, table=True):
         max_length=64,
         description="平台类型名",
     )
+    bot_self_id: str = Field(
+        default="",
+        max_length=64,
+        description="订阅创建时所用 bot 的 self_id（合并转发节点身份）",
+    )
 
     interval: int = Field(default=INHERIT_VALUE, description="监控间隔(分钟)")
     next_check_time: datetime | None = Field(default=None, description="下次检查时间")

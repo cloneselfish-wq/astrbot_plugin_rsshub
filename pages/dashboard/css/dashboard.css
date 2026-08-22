@@ -153,6 +153,8 @@
 .status-badge.stopped { background: #f1f5f9; color: #475569; }
 .feed-title { font-weight: 600; color: #1b1c1d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed-url { font-size: 12px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.llm-reason { font-size: 12px; color: #b45309; overflow-wrap: anywhere; word-break: break-word; margin-top: 2px; }
+.llm-reason-label { color: #d97706; font-weight: 600; margin-right: 4px; }
 .cell-mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cell-wrap { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .btn-action { padding: 4px 8px !important; height: auto !important; font-size: 12px !important; text-transform: none !important; letter-spacing: 0 !important; min-width: auto !important; color: #3c96ca !important; white-space: nowrap; }
@@ -432,6 +434,8 @@ textarea.select-input { resize: vertical; line-height: 1.5; }
 [data-theme="dark"] .sub-table tr { background: var(--card-bg); }
 [data-theme="dark"] .feed-title { color: var(--text-primary); }
 [data-theme="dark"] .feed-url { color: var(--text-tertiary); }
+[data-theme="dark"] .llm-reason { color: #fbbf24; }
+[data-theme="dark"] .llm-reason-label { color: #f59e0b; }
 [data-theme="dark"] .status-badge { background: var(--bg-secondary); color: var(--text-secondary); }
 [data-theme="dark"] .status-badge.pending { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
 [data-theme="dark"] .status-badge.success { background: rgba(52, 211, 153, 0.15); color: #34d399; }

@@ -90,6 +90,21 @@ class FakeProviderContext:
         return FakeProviderResponse(self.provider.completion_text)
 
 
+class FakeProviderSequence(FakeProvider):
+    """按调用次序依次返回文本的 provider，用于测试 AI 重试路径。"""
+
+    def __init__(self, texts):
+        super().__init__(texts[0] if texts else "")
+        self.texts = list(texts)
+        self.calls = 0
+
+    async def text_chat(self, **kwargs):
+        self.prompts.append(kwargs)
+        text = self.texts[min(self.calls, len(self.texts) - 1)]
+        self.calls += 1
+        return FakeProviderResponse(text)
+
+
 class FakeProviderSelectorContext:
     def __init__(
         self, *, default_provider: FakeProvider, selected_provider: FakeProvider
@@ -124,7 +139,7 @@ class FakeProviderSelectorContext:
 
 def test_content_handler_runtime_resolves_handlers_mode_semantics():
     runtime = ContentHandlerRuntime()
-    user = User(id="user-1")
+    user = User(id="user-1", handlers=[])
     inherit_sub = Subscription(
         id=1,
         user_id="user-1",
@@ -136,7 +151,7 @@ def test_content_handler_runtime_resolves_handlers_mode_semantics():
                 "type": "builtin",
                 "name": "ai_transform",
                 "status": 1,
-                "config": {"prompt": "ignored"},
+                "config": {"prompt": "used"},
             }
         ],
     )
@@ -170,14 +185,38 @@ def test_content_handler_runtime_resolves_handlers_mode_semantics():
             }
         ],
     )
+    # inherit + 无订阅 handlers -> 回落到用户级 handlers
+    user_handlers_user = User(
+        id="user-1",
+        handlers=[
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "keep useful"},
+            }
+        ],
+    )
+    no_handlers_sub = Subscription(
+        id=4,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="inherit",
+    )
 
     inherit = runtime.resolve_handlers(subscription=inherit_sub, user=user)
     override = runtime.resolve_handlers(subscription=override_sub, user=user)
     disabled = runtime.resolve_handlers(subscription=disabled_sub, user=user)
+    fallback = runtime.resolve_handlers(
+        subscription=no_handlers_sub, user=user_handlers_user
+    )
 
-    assert inherit == []
+    # inherit 模式下订阅自带 handler 优先（每组独立过滤/改写条件生效）
+    assert [spec.name for spec in inherit] == ["ai_transform"]
     assert [spec.name for spec in override] == ["ai_transform"]
     assert disabled == []
+    assert [spec.name for spec in fallback] == ["ai_filter"]
 
 
 @pytest.mark.asyncio
@@ -220,6 +259,90 @@ async def test_ai_filter_invalid_json_allows_with_trace():
     assert result.trace[0]["allow"] is True
     assert result.trace[0]["reason"] == "invalid json"
     assert "raw_xml" in provider.prompts[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_parses_markdown_fenced_json_and_filters():
+    # AI 用 ```json 代码块包裹输出，之前会 json.loads 失败并被放行
+    provider = FakeProvider('```json\n{"allow":false,"reason":"广告"}\n```')
+    runtime = ContentHandlerRuntime(FakeProviderContext(provider))
+    sub = Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="override",
+        handlers=[
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "跳过广告", "input_scope": "text"},
+            }
+        ],
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=EntryContentContext(
+            title="title",
+            summary="summary",
+            content="content",
+            link="https://example.com/entry",
+            author="author",
+            feed_title="Feed",
+            feed_link="https://example.com/feed.xml",
+            raw_xml="<item>raw</item>",
+        ),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["reason"] == "广告"
+    assert len(provider.prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_retries_once_then_filters():
+    # 首次输出带前缀文字无法解析，重试后返回合法 JSON，应拦截
+    provider = FakeProviderSequence(
+        ["好的，我判断一下，", '{"allow":false,"reason":"不相关"}']
+    )
+    runtime = ContentHandlerRuntime(FakeProviderContext(provider))
+    sub = Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="override",
+        handlers=[
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "只保留相关", "input_scope": "text"},
+            }
+        ],
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=EntryContentContext(
+            title="title",
+            summary="summary",
+            content="content",
+            link="https://example.com/entry",
+            author="author",
+            feed_title="Feed",
+            feed_link="https://example.com/feed.xml",
+            raw_xml="<item>raw</item>",
+        ),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["reason"] == "不相关"
+    assert len(provider.prompts) == 2
 
 
 @pytest.mark.asyncio
@@ -519,6 +642,131 @@ async def test_dispatch_cleans_raw_generated_layout_when_subscription_load_fails
         )
 
     assert not temp_png.exists()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_records_failed_history_when_user_ensure_raises():
+    """per-sub 处理早期（_ensure_user）异常时，也落一条 failed 历史。"""
+    sender = FakeSender()
+    sub = Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        platform_name="telegram",
+        target_session="telegram:Group:1",
+    )
+    sub_repo = AsyncMock()
+    sub_repo.get_active_by_feed_id.return_value = [sub]
+    user_repo = AsyncMock()
+    user_repo.get_or_create.side_effect = RuntimeError("user repo exploded")
+    history_repo = AsyncMock()
+    history_repo.save.side_effect = lambda history: history
+
+    dispatcher = NotificationDispatcher(
+        subscription_repo=sub_repo,
+        user_repo=user_repo,
+        push_history_repo=history_repo,
+        sender_provider=FakeSenderProvider(sender),
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="fallback",
+        entry_title="Title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        feed_title="Feed",
+        feed_link="https://example.com/feed.xml",
+    )
+
+    assert stats == {"success": 0, "failed": 1, "pending": 0, "skipped": 0}
+    assert sender.requests == []
+    history_repo.save.assert_awaited_once()
+    saved = history_repo.save.await_args.args[0]
+    assert saved.status == "failed"
+    assert saved.max_retries == 0
+    assert saved.fail_reason and "user repo exploded" in saved.fail_reason
+    assert saved.sub_id == 1
+    assert saved.entry_title == "Title"
+    assert saved.handler_trace is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_records_failed_history_with_llm_trace_when_formatting_raises():
+    """异常发生在 handler 执行之后（格式化阶段）时，失败历史保留 LLM 判定 trace。"""
+    sender = FakeSender()
+    sub = Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        platform_name="telegram",
+        target_session="telegram:Group:1",
+    )
+    user = User(id="user-1")
+    sub_repo = AsyncMock()
+    sub_repo.get_active_by_feed_id.return_value = [sub]
+    user_repo = AsyncMock()
+    user_repo.get_or_create.return_value = user
+    history_repo = AsyncMock()
+    history_repo.save.side_effect = lambda history: history
+    llm_trace = [
+        {
+            "id": "builtin.ai_filter",
+            "name": "ai_filter",
+            "status": "ok",
+            "allow": True,
+            "reason": "该推文包含演唱会票务情报，符合订阅要求",
+            "scope": "text",
+        }
+    ]
+
+    class RuntimeReturnsTrace(ContentHandlerRuntime):
+        async def process_entry_with_trace(self, **kwargs):
+            return HandlerProcessResult(
+                entry=kwargs.get("entry"),
+                allow=True,
+                trace=tuple(llm_trace),
+            )
+
+    class DispatcherWithFormatFailure(NotificationDispatcher):
+        async def _format_effective_entry_content(self, **kwargs):
+            raise RuntimeError("format exploded")
+
+    dispatcher = DispatcherWithFormatFailure(
+        subscription_repo=sub_repo,
+        user_repo=user_repo,
+        push_history_repo=history_repo,
+        sender_provider=FakeSenderProvider(sender),
+        content_handler_runtime=RuntimeReturnsTrace(),
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="fallback",
+        entry_title="Title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        feed_title="Feed",
+        feed_link="https://example.com/feed.xml",
+        raw_entry=EntryContentContext(
+            title="Title",
+            summary="Raw",
+            content="Raw",
+            link="https://example.com/entry",
+            author="",
+            feed_title="Feed",
+            feed_link="https://example.com/feed.xml",
+        ),
+    )
+
+    assert stats == {"success": 0, "failed": 1, "pending": 0, "skipped": 0}
+    assert sender.requests == []
+    history_repo.save.assert_awaited_once()
+    saved = history_repo.save.await_args.args[0]
+    assert saved.status == "failed"
+    assert saved.max_retries == 0
+    assert saved.handler_trace == llm_trace
+    assert "format exploded" in (saved.fail_reason or "")
 
 
 @pytest.mark.asyncio

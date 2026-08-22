@@ -101,6 +101,11 @@ class OneBotMessageSender(DefaultMessageSender):
                     self_id = getattr(msg_obj, "self_id", None)
                     if self_id and str(self_id) != "0":
                         return str(self_id)
+            # 订阅创建时存储的 bot self_id：主动推送（无事件）时用它来
+            # 确定合并转发节点身份，让消息显示为订阅时那个 bot 发送。
+            stored = getattr(context, "bot_self_id", "") or ""
+            if stored and str(stored) != "0":
+                return str(stored)
             platform_name = getattr(context, "platform_name", "") or ""
             if platform_name:
                 self_id = get_bot_self_id(platform_name)
@@ -163,6 +168,12 @@ class OneBotMessageSender(DefaultMessageSender):
 
             bot_client = self._resolve_bot_client(context)
             bot_self_id = self._resolve_bot_self_id(context)
+
+            # 多 bot 同平台时无法唯一确定发送 bot 的 self_id，
+            # 此时退回到基类的纯文本/图片组件发送，避免合并转发节点
+            # 携带错误的 uin 导致消息显示为从其他 bot "伪造转发"。
+            if not bot_self_id:
+                return await super().send_to_user(request, context)
 
             nickname = (
                 context.channel.title if context and context.channel.title else "RSSHub"

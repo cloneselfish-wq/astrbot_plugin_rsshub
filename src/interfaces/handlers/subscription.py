@@ -7,6 +7,24 @@ from astrbot.api.event import AstrMessageEvent
 from ...application.services.session_push_queue import SessionPushQueue
 
 
+def _extract_bot_self_id(event: AstrMessageEvent) -> str:
+    """从事件中提取接收消息的 bot self_id，用于合并转发节点身份。
+
+    ``message_obj.self_id`` 是订阅那一刻实际收到指令的那个 bot 的 QQ 号，
+    把它存到订阅上，推送合并转发时就能用正确节点的 uin，而不是 bot1。
+    """
+    msg_obj = getattr(event, "message_obj", None)
+    if msg_obj is None:
+        return ""
+    self_id = getattr(msg_obj, "self_id", None)
+    if self_id is None:
+        return ""
+    sid = str(self_id).strip()
+    if not sid or sid == "0":
+        return ""
+    return sid
+
+
 async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
     """订阅 RSS 源"""
     if not url:
@@ -22,12 +40,15 @@ async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
     if not valid_urls:
         return {"plain": "请提供有效的 RSS 链接（需以 http 或 https 开头）"}
 
+    bot_self_id = _extract_bot_self_id(event)
+
     if len(valid_urls) == 1:
         result = await deps["subscribe_cmd"].execute(
             url=valid_urls[0],
             user_id=user_id,
             target_session=target_session,
             platform_name=platform_name,
+            bot_self_id=bot_self_id,
         )
         return {"plain": result.message}
 
@@ -38,6 +59,7 @@ async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
             user_id=user_id,
             target_session=target_session,
             platform_name=platform_name,
+            bot_self_id=bot_self_id,
         )
         results.append(r)
 

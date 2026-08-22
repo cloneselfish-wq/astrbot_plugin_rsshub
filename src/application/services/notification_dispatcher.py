@@ -78,6 +78,7 @@ class SendTarget:
     platform_name: str | None
     target_session: str | None
     sub_id: int | None = None
+    bot_self_id: str = ""  # 订阅创建时所用 bot 的 self_id（合并转发节点身份）
 
 
 @dataclass(frozen=True)
@@ -282,6 +283,7 @@ class NotificationDispatcher:
             platform_name=subscription.platform_name,
             target_session=subscription.target_session,
             sub_id=subscription.id,
+            bot_self_id=subscription.bot_self_id or "",
         )
 
     @staticmethod
@@ -546,6 +548,55 @@ class NotificationDispatcher:
         history.mark_skipped(reason)
         await self._push_history_repo.save(history)
 
+    async def _save_error_history(
+        self,
+        *,
+        subscription: Any,
+        feed_id: int,
+        processed_entry: EntryContentContext | None,
+        handler_trace: list[dict[str, Any]] | None,
+        effective_title: str,
+        effective_link: str,
+        effective_content: str,
+        entry_guid: str | None,
+        feed_title: str,
+        feed_link: str,
+        error: str,
+    ) -> None:
+        """分发阶段异常也落一条失败历史，保留已执行的 LLM 判定 trace。
+
+        max_retries=0 保证该记录不会被自动失败队列重推（异常可能永久性，
+        例如 handler 配置损坏）；水位未确认，轮询下一轮会重新处理该条目，
+        因而无需自动重试本条。fail_reason 带 `dispatch error: ` 前缀，
+        与发送阶段失败（`send failed` 等）区分开。
+        """
+        history = PushHistory(
+            sub_id=subscription.id,
+            user_id=subscription.user_id,
+            feed_id=feed_id,
+            source_type="feed",
+            source_key=self._feed_source_key(feed_id, subscription.id),
+            content=effective_content,
+            raw_xml=(
+                str(processed_entry.raw_xml or "").strip()
+                if processed_entry is not None
+                else None
+            )
+            or None,
+            media_urls=None,
+            handler_trace=handler_trace,
+            entry_title=effective_title,
+            entry_link=effective_link,
+            entry_guid=entry_guid,
+            feed_title=feed_title,
+            feed_link=feed_link,
+            platform_name=subscription.platform_name,
+            target_session=subscription.target_session,
+            max_retries=0,
+        )
+        history.mark_failed(f"dispatch error: {error}")
+        await self._push_history_repo.save(history)
+
     async def dispatch_to_feed_subscribers(
         self,
         feed_id: int,
@@ -635,10 +686,15 @@ class NotificationDispatcher:
 
             # 2. 为每个订阅解析最终 payload；handler skip 在此阶段直接落审计记录。
             for sub in subscriptions:
+                # 提前初始化兜底值：即使异常发生在 handler 处理早期，
+                # except 分支也能落一条可审计的失败历史（含已执行的 LLM 判定 trace）。
+                processed_entry = raw_entry
+                handler_trace: list[dict[str, Any]] | None = None
+                effective_title = entry_title
+                effective_link = entry_link
+                effective_content = content
                 try:
                     user = await self._ensure_user(sub.user_id)
-                    processed_entry = raw_entry
-                    handler_trace: list[dict[str, Any]] | None = None
                     handler_allowed = True
                     handler_reason = ""
                     if raw_entry is not None:
@@ -825,6 +881,28 @@ class NotificationDispatcher:
                     )
                     stats["failed"] += 1
                     record_error_detail(e)
+                    # 异常同样落一条可审计的失败历史（含已执行的 LLM 判定 trace）。
+                    # max_retries=0 不进入自动失败队列；水位未确认，下轮轮询会重新处理。
+                    try:
+                        await self._save_error_history(
+                            subscription=sub,
+                            feed_id=feed_id,
+                            processed_entry=processed_entry,
+                            handler_trace=handler_trace,
+                            effective_title=effective_title,
+                            effective_link=effective_link,
+                            effective_content=effective_content,
+                            entry_guid=entry_guid,
+                            feed_title=feed_title,
+                            feed_link=feed_link,
+                            error=str(e),
+                        )
+                    except Exception as save_exc:
+                        logger.warning(
+                            "记录订阅 %s 分发异常历史失败: %s",
+                            sub.id,
+                            save_exc,
+                        )
 
             if self._basic_settings.deduplicate_multi_bot and prepared_dispatches:
                 grouped: dict[
@@ -1211,6 +1289,7 @@ class NotificationDispatcher:
                         send_mode=self._normalize_send_mode_value(send_mode),
                         style=style,
                         sender_strategy=sender_strategy,
+                        bot_self_id=target.bot_self_id or "",
                     ),
                 )
 

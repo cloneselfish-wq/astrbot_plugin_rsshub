@@ -478,6 +478,12 @@ async def ensure_profile_schema(conn) -> list[str]:
             )
             applied.append("rsshub_sub.handlers_mode")
             logger.info("数据库 schema 自愈: 为 rsshub_sub 添加 handlers_mode 字段")
+        if "bot_self_id" not in sub_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE rsshub_sub ADD COLUMN bot_self_id VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+            applied.append("rsshub_sub.bot_self_id")
+            logger.info("数据库 schema 自愈: 为 rsshub_sub 添加 bot_self_id 字段")
 
     return applied
 

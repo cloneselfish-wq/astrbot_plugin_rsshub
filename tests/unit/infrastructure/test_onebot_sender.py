@@ -90,6 +90,10 @@ async def test_onebot_sender_falls_back_to_text_nodes_when_merged_forward_fails(
     monkeypatch.setattr(
         sys.modules["astrbot.api.message_components"], "Video", _Video, raising=False
     )
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
+    )
 
     request = SendRequest(
         session_id="default:GroupMessage:1",
@@ -153,6 +157,10 @@ async def test_onebot_sender_places_media_nodes_before_text(monkeypatch):
     monkeypatch.setattr(
         sys.modules["astrbot.api.message_components"], "Video", _Video, raising=False
     )
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
+    )
 
     request = SendRequest(
         session_id="default:GroupMessage:1",
@@ -215,6 +223,10 @@ async def test_onebot_sender_prefers_local_video_path_by_default(monkeypatch):
     monkeypatch.setattr(
         sys.modules["astrbot.api.message_components"], "Video", _Video, raising=False
     )
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
+    )
 
     request = SendRequest(
         session_id="default:GroupMessage:1",
@@ -269,6 +281,10 @@ async def test_onebot_sender_video_uses_local_file(
     monkeypatch.setattr(
         sys.modules["astrbot.api.message_components"], "Video", _Video, raising=False
     )
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
+    )
 
     result = await sender.send_to_user(
         SendRequest(
@@ -320,6 +336,10 @@ async def test_onebot_sender_ignores_telegraph_strategy(monkeypatch):
     )
     monkeypatch.setattr(
         sys.modules["astrbot.api.message_components"], "Video", _Video, raising=False
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
     )
 
     result = await sender.send_to_user(
@@ -492,8 +512,10 @@ async def test_onebot_sender_uses_provider_self_id_for_active_push(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_onebot_sender_preserves_default_uin_when_self_id_is_unknown(monkeypatch):
-    """未知 bot QQ 号时不可伪造账号，应保留 SDK 默认 uin。"""
+async def test_onebot_sender_uses_stored_bot_self_id_for_active_push(monkeypatch):
+    """主动推送（无事件）时，应优先使用订阅创建时存储的 bot QQ 号，
+    让合并转发节点显示为订阅时那个 bot（如 bot3），而不是 provider
+    解析到的任意一个账号。"""
     sender = OneBotMessageSender()
     calls: list[tuple[str, list]] = []
 
@@ -514,9 +536,47 @@ async def test_onebot_sender_preserves_default_uin_when_self_id_is_unknown(monke
         "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.Plain",
         _Plain,
     )
+    # provider 可能解析到任意账号（如 bot1），存储的 bot_self_id 必须优先
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
+    )
+
+    result = await sender.send_to_user(
+        SendRequest(session_id="default:GroupMessage:1", message="entry content"),
+        context=MessageContext(
+            channel=ChannelInfo(title="Feed Title"),
+            platform_name="aiocqhttp",
+            bot_self_id="bot3",
+        ),
+    )
+
+    assert result.ok is True
+    assert calls[0][1][0].nodes[0].uin == "bot3"
+
+
+@pytest.mark.asyncio
+async def test_onebot_sender_falls_back_to_base_sender_when_self_id_is_unknown(monkeypatch):
+    """多 bot 同平台无法确定 self_id 时，退回到基类纯文本/图片组件发送，
+    避免合并转发节点携带错误的 uin 导致消息显示为从其他 bot "伪造转发"。"""
+    sender = OneBotMessageSender()
+    calls: list[tuple[str, list]] = []
+
+    async def fake_send_chain(session_id: str, chain: list, **_kwargs):
+        calls.append((session_id, chain))
+        return SendResult(ok=True)
+
+    monkeypatch.setattr(sender, "_send_chain", fake_send_chain)
+    # Mock get_bot_self_id to return empty — simulates multi-bot same-platform
     monkeypatch.setattr(
         "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
         lambda _platform_name: "",
+    )
+    # Mock _formatter.build_chain so base sender produces a predictable chain
+    monkeypatch.setattr(
+        sender._formatter,
+        "build_chain",
+        lambda prepared_media, text, failed_urls, platform: [_Plain(text or "fallback")],
     )
 
     result = await sender.send_to_user(
@@ -528,7 +588,12 @@ async def test_onebot_sender_preserves_default_uin_when_self_id_is_unknown(monke
     )
 
     assert result.ok is True
-    assert calls[0][1][0].nodes[0].uin == "0"
+    # 基类发送路径：chain 是纯组件列表，不包含合并转发 Nodes
+    assert len(calls) == 1
+    chain = calls[0][1]
+    assert len(chain) == 1
+    assert isinstance(chain[0], _Plain)
+    assert chain[0].text == "entry content"
 
 
 # ------------------------------------------------------------------
@@ -564,6 +629,10 @@ async def test_onebot_merged_forward_uses_image_for_gif(monkeypatch):
     )
     monkeypatch.setattr(
         sys.modules["astrbot.api.message_components"], "Video", _Video, raising=False
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
     )
 
     result = await sender.send_to_user(

@@ -45,6 +45,7 @@ class InfrastructureMessageSenderAdapter:
                 if context and getattr(context, "sender_strategy", None) is not None
                 else self._sender_strategy
             ),
+            bot_self_id=context.bot_self_id if context else "",
         )
         result = await self._sender.send_to_user(
             InfraSendRequest(

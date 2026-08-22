@@ -73,7 +73,7 @@ export const pushHistoryPageTemplate = String.raw`
                 </td>
                 <td class="col-status" data-label="状态"><span class="status-badge" :class="h.status">{{ h.status }}</span></td>
                 <td class="col-user cell-mono" data-label="用户" :title="h.user_id">{{ h.user_id }}</td>
-                <td class="col-feed" data-label="条目"><div class="feed-title">{{ h.entry_title || '无标题' }}</div><div class="feed-url" :title="h.entry_link">{{ h.feed_title || '' }}</div></td>
+                <td class="col-feed" data-label="条目"><div class="feed-title">{{ h.entry_title || '无标题' }}</div><div class="feed-url" :title="h.entry_link">{{ h.feed_title || '' }}</div><div class="llm-reason" v-if="historyLlmReason(h)"><span class="llm-reason-label">LLM 判定</span>{{ historyLlmReason(h) }}</div></td>
                 <td class="col-session cell-mono" data-label="目标" :title="h.target_session">{{ h.target_session || '-' }}</td>
                 <td class="col-error cell-wrap" data-label="错误" :title="h.fail_reason || ''">{{ h.fail_reason || '-' }}</td>
                 <td class="col-interval" data-label="重试">{{ h.retry_count }}/{{ h.max_retries }}</td>

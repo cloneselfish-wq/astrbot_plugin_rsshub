@@ -361,12 +361,22 @@ class FeedPollingService:
         *,
         notify_new_entries: bool = True,
         verbose: bool = False,
+        dispatch_to_all: bool = False,
     ) -> FeedPollingResult:
-        """Poll one feed and dispatch only to the selected subscriptions."""
+        """Poll one feed and dispatch to the selected subscriptions.
+
+        ``dispatch_to_all=True`` 时忽略 ``subscription_ids`` 的分发限制，把新条目
+        分发给该 feed 的全部活跃订阅。定时轮询需要这个行为：已读水位
+        (``feed.entry_hashes``) 是 feed 级的，一旦某个订阅先到期把水位推走，
+        其他订阅（例如同一个源订阅到另一个群）再到期时就再也看不到这些条目。
+        重复推送由 push_history 的 per-订阅 dispatch guard 拦截。
+        """
         return await self.poll_feed(
             feed_id,
             notify_new_entries=notify_new_entries,
-            subscription_ids=list(dict.fromkeys(subscription_ids)),
+            subscription_ids=(
+                None if dispatch_to_all else list(dict.fromkeys(subscription_ids))
+            ),
             verbose=verbose,
         )
 

@@ -53,18 +53,40 @@ export function cloneJsonValue(value) {
   }
 }
 
+// 与后端 handlers.py 的 _generate_handler_id 保持一致：id 缺失时由 name 生成。
+function generateHandlerId(name, type, seenIds) {
+  const base = type === 'builtin' ? `builtin.${name}` : name;
+  let candidate = base;
+  let suffix = 2;
+  while (seenIds.has(candidate)) {
+    candidate = `${base}.${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
 export function normalizeHandlers(handlers) {
   if (!Array.isArray(handlers)) return [];
-  return handlers
-    .filter((item) => item && typeof item === 'object')
-    .map((item) => ({
-      id: String(item.id || '').trim(),
-      type: String(item.type || 'builtin').trim() || 'builtin',
-      name: String(item.name || '').trim(),
+  const seenIds = new Set();
+  const normalized = [];
+  for (const item of handlers) {
+    if (!item || typeof item !== 'object') continue;
+    const name = String(item.name || '').trim();
+    if (!name) continue;
+    const type = String(item.type || 'builtin').trim() || 'builtin';
+    let id = String(item.id || '').trim();
+    if (!id) id = generateHandlerId(name, type, seenIds);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    normalized.push({
+      id,
+      type,
+      name,
       status: Number.isFinite(Number(item.status)) ? Number(item.status) : -100,
       config: item.config && typeof item.config === 'object' ? { ...item.config } : {},
-    }))
-    .filter((item) => item.id && item.name);
+    });
+  }
+  return normalized;
 }
 
 export function handlersToEditorState(handlers) {
@@ -149,6 +171,7 @@ export function createEmptyEditForm() {
     display_media: -100,
     handlers_mode: 'inherit',
     handlers_json: '[]',
+    _originalHandlers: [],
   };
 }
 
@@ -177,6 +200,7 @@ export function createEditFormFromSub(sub) {
     display_media: sub.display_media ?? -100,
     handlers_mode: sub.handlers_mode || 'inherit',
     ...handlersToEditorState(sub.handlers),
+    _originalHandlers: normalizeHandlers(sub.handlers),
   };
 }
 
@@ -335,6 +359,22 @@ export function traceStatusText(step) {
 
 export function traceReasonText(step) {
   return String(step?.reason || step?.message || step?.error || '').trim();
+}
+
+// 从推送记录的 handler_trace 中提取 ai_filter 的 LLM 判定原因。
+// 即使条目被跳过，判定原因也已随 trace 落库，列表与详情均可展示。
+export function llmReasonText(history) {
+  const trace = Array.isArray(history?.handler_trace) ? history.handler_trace : [];
+  for (const step of trace) {
+    if (!step || typeof step !== 'object') continue;
+    const name = String(step.name || '').trim();
+    const id = String(step.id || '');
+    if (name === 'ai_filter' || id === 'ai_filter' || id.endsWith('.ai_filter')) {
+      const reason = traceReasonText(step);
+      if (reason) return reason;
+    }
+  }
+  return '';
 }
 
 export function pieSegments(items) {

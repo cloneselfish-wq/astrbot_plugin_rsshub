@@ -132,9 +132,15 @@ async def test_scheduler_groups_due_subscriptions_by_feed_and_triggers_polling(
     calls = polling_service.poll_feed_group.await_args_list
     assert len(calls) == 2
     assert calls[0].args == (10, [1, 2])
-    assert calls[0].kwargs == {"notify_new_entries": True}
+    assert calls[0].kwargs == {
+        "notify_new_entries": True,
+        "dispatch_to_all": True,
+    }
     assert calls[1].args == (20, [3])
-    assert calls[1].kwargs == {"notify_new_entries": True}
+    assert calls[1].kwargs == {
+        "notify_new_entries": True,
+        "dispatch_to_all": True,
+    }
 
     assert subs[0].next_check_time is not None
     assert subs[1].next_check_time is not None
@@ -198,6 +204,7 @@ async def test_scheduler_still_updates_next_check_after_polling_error(monkeypatc
         10,
         [1],
         notify_new_entries=True,
+        dispatch_to_all=True,
     )
     assert subs[0].next_check_time is not None
     assert subs[0].next_check_time > before

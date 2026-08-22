@@ -31,7 +31,7 @@ flowchart TD
   A["subscription + user + entry"] --> B{"handlers_mode"}
   B -->|"disabled"| C["跳过处理链"]
   B -->|"override"| D["使用订阅 handlers"]
-  B -->|"inherit"| E["使用用户 handlers"]
+  B -->|"inherit"| E["订阅 handlers 优先，否则用户 handlers"]
   B -->|"legacy / dirty value"| F["兼容归一化"]
   D --> G["按配置顺序执行"]
   E --> G
@@ -65,11 +65,13 @@ flowchart TD
 解析顺序：
 
 1. `handlers_mode=disabled` -> 不执行
-2. `handlers_mode=override` -> 使用订阅 handlers
-3. `handlers_mode=inherit` -> 使用用户 handlers
-4. 其他旧值 -> 尽量兼容，优先回退到用户或订阅现有数据
+2. `handlers_mode=override` -> 只使用订阅 handlers（可为空）
+3. `handlers_mode=inherit`（默认）-> 订阅自带 handlers 优先，未配置时回落到用户 handlers。这样每个群/订阅配了自己的过滤与改写条件后立即生效，无需额外切 override。
+4. 其他旧值/空值 -> 按 inherit 兼容处理
 
 这里的目标不是做最严格的 schema 拒绝，而是在 runtime 里尽量容忍历史数据。
+
+另外，`normalize_handlers` 在 handler 缺 `id` 时会用 `name` 自动生成 id（如 `builtin.ai_filter`），避免粘贴 JSON 时被静默丢弃；前端 `normalizeHandlers` 与之保持一致。
 
 ## 执行顺序
 

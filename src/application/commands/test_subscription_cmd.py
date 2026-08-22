@@ -329,6 +329,7 @@ class TestSubscriptionCommand:
                     platform_name=platform_name,
                     target_session=target_session,
                     sub_id=0,
+                    bot_self_id=subscription.bot_self_id if subscription else "",
                 ),
                 content=content,
                 media_urls=media_urls,

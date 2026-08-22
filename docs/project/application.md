@@ -57,6 +57,7 @@
 | Plugin Pages 手动重试 | 复用同一条 `push_history`，更新结果和最近活动时间 | 不新增历史行，不消耗自动重试次数。 |
 | `deduplicate_multi_bot` | 只在同一 `target_session` 且最终 payload 等价时去重 | 被压制的发送必须写入 `status=skipped`。 |
 | 规则性跳过 | handler deny、通知关闭、成功去重 guard、多 BOT 去重都写入 `status=skipped` | 这类 skipped 是可审计 ack；不能伪装成 success。 |
+| 分发异常 | 单订阅分发阶段抛出异常时写入 `status=failed`，`fail_reason` 带 `dispatch error: ` 前缀 | 保留已执行的 LLM 判定 `handler_trace`；`max_retries=0` 不进自动失败队列，水位未确认由轮询重试。 |
 | Feed 水位确认 | 只有 `success` 或明确规则性 `skipped` 会确认本轮新 entry | `pending`、`failed` 或分发异常不能推进 `entry_hashes` / 条件请求水位，避免漏推。 |
 
 ## 已移除的应用能力

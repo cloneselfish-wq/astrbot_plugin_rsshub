@@ -67,7 +67,6 @@ from ...domain.entities.handlers import (
 )
 from ...domain.entities.subscription import (
     HANDLERS_MODE_DISABLED,
-    HANDLERS_MODE_INHERIT,
     HANDLERS_MODE_OVERRIDE,
     Subscription,
 )
@@ -85,8 +84,49 @@ from .html_parser import HTMLParser
 logger = get_logger()
 
 
-class _SyntheticHandlerEvent:
-    """Minimal event adapter for tool_loop_agent in non-chat paths."""
+def _extract_json_object(payload: str) -> dict[str, Any] | None:
+    """从 AI 输出中尽量提取一个 JSON 对象。
+
+    容忍常见 LLM 输出噪音：markdown 代码块围栏（```json ... ```）、
+    前后缀解释文字、被截断时取第一个 ``{`` 到最后一个 ``}`` 之间的内容。
+    无法提取时返回 None（由调用方决定重试或放行）。
+    """
+    if not payload:
+        return None
+    text = str(payload).strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(text[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return None
+
+
+class _SyntheticHandlerEvent(AstrMessageEvent):
+    """Minimal event adapter for tool_loop_agent in non-chat paths.
+
+    继承 AstrMessageEvent 以通过 AstrAgentContext 的 pydantic isinstance 校验，
+    同时提供所有必要方法的最小实现，使 tool_loop_agent 在无真实事件时可用。
+    """
 
     def __init__(
         self,
@@ -95,6 +135,8 @@ class _SyntheticHandlerEvent:
         platform_name: str,
         sender_id: str,
     ) -> None:
+        # 不调用 AstrMessageEvent.__init__() —— 框架父类可能要求复杂参数。
+        # 这里只注入 tool_loop_agent 实际使用的最小子集。
         self.unified_msg_origin = str(unified_msg_origin or "").strip()
         self.role = "member"
         self._platform_name = str(platform_name or "").strip()
@@ -226,17 +268,12 @@ class ContentHandlerRuntime:
         elif mode == HANDLERS_MODE_OVERRIDE:
             active = subscription.get_handlers()
         else:
-            active = user.get_handlers() if user else []
-            if (
-                mode
-                not in {
-                    HANDLERS_MODE_INHERIT,
-                    HANDLERS_MODE_OVERRIDE,
-                    HANDLERS_MODE_DISABLED,
-                }
-                and subscription.get_handlers()
-            ):
-                active = subscription.get_handlers()
+            # inherit / 历史空值：订阅自带 handler 优先，其次继承用户级。
+            # 这样每个群(订阅)配了自己的过滤/改写条件后立即生效，
+            # 未配置的订阅则继续回落到用户级 handlers。
+            active = subscription.get_handlers()
+            if not active:
+                active = user.get_handlers() if user else []
         return normalize_handlers(active)
 
     async def process_entry(
@@ -437,8 +474,8 @@ class ContentHandlerRuntime:
         return await self._run_ai_transform_plaintext(
             entry=entry,
             prompt=prompt,
-            provider_id=provider_id,
-            event=agent_event,
+            provider=provider,
+            session_id=session_id,
         )
 
     async def _run_ai_transform_plaintext(
@@ -446,8 +483,8 @@ class ContentHandlerRuntime:
         *,
         entry: EntryContentContext,
         prompt: str,
-        provider_id: str,
-        event: AstrMessageEvent | Any,
+        provider: Provider,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         source_payload = {
             "title": entry.title,
@@ -467,16 +504,12 @@ class ContentHandlerRuntime:
             f"\n用户要求:\n{prompt}"
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
-        response = await self._context.tool_loop_agent(
-            event=event,
-            chat_provider_id=provider_id,
+        response = await provider.text_chat(
             prompt=request_prompt,
-            tools=ToolSet(),
+            session_id=session_id or "rsshub-handlers",
             contexts=[],
+            persist=False,
             system_prompt=self._resolve_system_prompt(),
-            max_steps=1,
-            tool_call_timeout=60,
-            stream=False,
         )
         payload = str(getattr(response, "completion_text", "") or "").strip()
         parsed = self._parse_transform_json(
@@ -607,28 +640,24 @@ class ContentHandlerRuntime:
             }
 
         request_prompt = (
-            "你是 RSS 内容过滤器。根据用户要求判断条目是否允许推送，只返回 JSON。"
+            "你是 RSS 内容过滤器。根据用户要求判断条目是否允许推送。"
+            "只返回一个 JSON 对象，不要输出解释、Markdown 或代码块。"
             '\n返回格式: {"allow":true,"reason":"..."}'
             "\nallow=false 表示跳过推送；reason 用一句话说明原因。"
             f"\n用户要求:\n{prompt}"
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
-        response = await provider.text_chat(
-            prompt=request_prompt,
-            session_id=session_id or "rsshub-handlers",
-            contexts=[],
-            persist=False,
-            system_prompt=self._resolve_system_prompt(),
+        parsed, failure_reason = await self._call_filter_once(
+            provider=provider,
+            request_prompt=request_prompt,
+            session_id=session_id,
         )
-        payload = str(getattr(response, "completion_text", "") or "").strip()
-        if not payload:
-            logger.warning("ai_filter 放行：AI 返回为空")
-            return True, "empty response"
-        try:
-            parsed = json.loads(payload)
-        except Exception as exc:
-            logger.warning("ai_filter 放行：AI 返回非法 JSON: %s", exc)
-            return True, "invalid json"
+        if parsed is None:
+            logger.warning(
+                "ai_filter 放行：%s（重试一次后仍失败，按放行处理）",
+                failure_reason,
+            )
+            return True, failure_reason
         if not isinstance(parsed, dict) or not isinstance(parsed.get("allow"), bool):
             logger.warning("ai_filter 放行：AI 返回结构无效")
             return True, "invalid schema"
@@ -640,6 +669,57 @@ class ContentHandlerRuntime:
         if reason_max_length > 0 and len(reason) > reason_max_length:
             reason = reason[:reason_max_length].rstrip()
         return bool(parsed["allow"]), reason
+
+    async def _call_filter_once(
+        self,
+        *,
+        provider: Any,
+        request_prompt: str,
+        session_id: str | None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """调用一次过滤判定，容忍非 JSON 输出并重试一次。
+
+        Returns:
+            (解析后的 JSON 对象, 失败原因)；成功时失败原因为空字符串。
+        """
+        response = await provider.text_chat(
+            prompt=request_prompt,
+            session_id=session_id or "rsshub-handlers",
+            contexts=[],
+            persist=False,
+            system_prompt=self._resolve_system_prompt(),
+        )
+        payload = str(getattr(response, "completion_text", "") or "").strip()
+        if not payload:
+            logger.warning("ai_filter 放行：AI 返回为空")
+            return None, "empty response"
+        parsed = _extract_json_object(payload)
+        if parsed is not None:
+            return parsed, ""
+        # 重试一次：明确要求只返回 JSON
+        logger.warning("ai_filter 解析失败，重试一次：AI 返回非 JSON 输出")
+        retry_prompt = (
+            request_prompt
+            + "\n\n你上一次的输出不是合法 JSON。请只返回一个 JSON 对象，"
+            '格式为 {"allow":true,"reason":"..."}，不要包含 Markdown 代码块、'
+            "解释文字或任何其他内容。"
+        )
+        retry_response = await provider.text_chat(
+            prompt=retry_prompt,
+            session_id=session_id or "rsshub-handlers",
+            contexts=[],
+            persist=False,
+            system_prompt=self._resolve_system_prompt(),
+        )
+        retry_payload = str(
+            getattr(retry_response, "completion_text", "") or ""
+        ).strip()
+        if not retry_payload:
+            return None, "empty response"
+        retry_parsed = _extract_json_object(retry_payload)
+        if retry_parsed is not None:
+            return retry_parsed, ""
+        return None, "invalid json"
 
     def _normalize_filter_scope(self, value: Any) -> str:
         normalized = str(value or "").strip()
@@ -661,10 +741,9 @@ class ContentHandlerRuntime:
     ) -> dict[str, Any]:
         if not payload:
             raise ValueError("ai_transform 输出为空")
-        try:
-            parsed = json.loads(payload)
-        except Exception as exc:
-            raise ValueError(f"ai_transform 输出不是合法 JSON: {exc}") from exc
+        parsed = _extract_json_object(payload)
+        if parsed is None:
+            raise ValueError("ai_transform 输出不是合法 JSON（含容忍解析）")
         if not isinstance(parsed, dict):
             raise ValueError("ai_transform 输出必须是 JSON 对象")
         allowed_fields = {"title", "summary", "content", "raw_xml"}
@@ -787,7 +866,13 @@ class ContentHandlerRuntime:
             getter = getattr(self._context, "get_using_provider", None)
             if getter is None:
                 return None
-            provider = getter(session_id) if session_id else getter()
+            # 先尝试按目标会话查找当前活跃的 provider（命令响应场景），
+            # 若会话无活跃 provider（自动推送 / Web 测试推送场景），
+            # 则回退到全局默认 provider。
+            if session_id:
+                provider = getter(session_id)
+            if provider is None:
+                provider = getter()
         return provider if callable(getattr(provider, "text_chat", None)) else None
 
     def _resolve_system_prompt(self) -> str:

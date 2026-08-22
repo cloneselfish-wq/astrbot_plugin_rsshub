@@ -691,6 +691,39 @@ async def test_poll_feed_group_limits_dispatch_to_selected_subscriptions():
 
 
 @pytest.mark.asyncio
+async def test_poll_feed_group_can_dispatch_to_all_feed_subscriptions():
+    service = FeedPollingService(
+        feed_repo=MagicMock(),
+        subscription_repo=MagicMock(),
+        fetcher_factory=MagicMock(),
+        parser=MagicMock(),
+        notification_dispatcher=MagicMock(),
+    )
+    expected = FeedPollingResult(
+        success=True,
+        status="updated",
+        message="ok",
+        feed_id=1,
+    )
+    service.poll_feed = AsyncMock(return_value=expected)
+
+    result = await service.poll_feed_group(
+        1,
+        [10],
+        notify_new_entries=True,
+        dispatch_to_all=True,
+    )
+
+    assert result is expected
+    service.poll_feed.assert_awaited_once_with(
+        1,
+        notify_new_entries=True,
+        subscription_ids=None,
+        verbose=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_history_entry_limit_does_not_mark_unattempted_entries_seen():
     old_last_modified = datetime(2026, 1, 1, tzinfo=timezone.utc)
     newer = EntryParsed(

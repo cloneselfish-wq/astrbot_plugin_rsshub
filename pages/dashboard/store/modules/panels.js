@@ -4,7 +4,8 @@ import {
 import {
   createEditFormFromSub,
   traceStatusText,
-  traceReasonText
+  traceReasonText,
+  llmReasonText
 } from '../helpers.js';
 
 export const panelsModule = {
@@ -73,5 +74,10 @@ export const panelsModule = {
 
   historyTraceReason(step) {
     return traceReasonText(step);
+  },
+
+  // 每条推送记录（含被跳过的）的 LLM 判定原因，取自 handler_trace 中的 ai_filter 步骤。
+  historyLlmReason(history) {
+    return llmReasonText(history);
   }
 };
