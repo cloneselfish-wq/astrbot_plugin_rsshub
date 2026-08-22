@@ -105,6 +105,27 @@ class FakeProviderSequence(FakeProvider):
         return FakeProviderResponse(text)
 
 
+class FlakyProvider:
+    """前 fail_times 次 text_chat 抛出瞬时异常，之后返回正常文本。
+
+    用于验证 _chat_with_backoff 的指数退避重试吸收限流/网络抖动，
+    不再把瞬时错误写进 handler_trace。
+    """
+
+    def __init__(self, completion_text: str, fail_times: int = 0) -> None:
+        self.completion_text = completion_text
+        self.fail_times = fail_times
+        self.calls = 0
+        self.prompts = []
+
+    async def text_chat(self, **kwargs):
+        self.prompts.append(kwargs)
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError("请求过于频繁，请稍后再试")
+        return FakeProviderResponse(self.completion_text)
+
+
 class FakeProviderSelectorContext:
     def __init__(
         self, *, default_provider: FakeProvider, selected_provider: FakeProvider
@@ -259,6 +280,111 @@ async def test_ai_filter_invalid_json_allows_with_trace():
     assert result.trace[0]["allow"] is True
     assert result.trace[0]["reason"] == "invalid json"
     assert "raw_xml" in provider.prompts[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_chat_with_backoff_retries_transient_errors(monkeypatch):
+    # 前两次调用抛限流异常，第三次成功；验证指数退避 + 最终返回文本
+    provider = FlakyProvider('{"allow":true,"reason":"ok"}', fail_times=2)
+    runtime = ContentHandlerRuntime()
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    text = await runtime._chat_with_backoff(
+        provider=provider,
+        prompt="prompt",
+        session_id="session-1",
+        max_attempts=3,
+        base_delay=1.5,
+        label="ai_filter",
+    )
+
+    assert text == '{"allow":true,"reason":"ok"}'
+    assert provider.calls == 3
+    assert sleeps == [1.5, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_chat_with_backoff_raises_after_max_attempts(monkeypatch):
+    # 一直失败时，达到 max_attempts 后抛出最后一次异常，交由 per-handler
+    # except 记录 error trace 并 fail-open（语义与改动前一致）。
+    provider = FlakyProvider("", fail_times=99)
+    runtime = ContentHandlerRuntime()
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    with pytest.raises(RuntimeError, match="请求过于频繁"):
+        await runtime._chat_with_backoff(
+            provider=provider,
+            prompt="prompt",
+            session_id="session-1",
+            max_attempts=3,
+            base_delay=1.5,
+            label="ai_filter",
+        )
+
+    assert provider.calls == 3
+    assert sleeps == [1.5, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_absorbs_transient_provider_error_no_error_trace(
+    monkeypatch,
+):
+    # 端到端：瞬时限流被 _chat_with_backoff 吸收后，trace 应为成功态，
+    # 不再出现"状态: error · 请求过于频繁"。
+    provider = FlakyProvider('{"allow":false,"reason":"广告"}', fail_times=2)
+    runtime = ContentHandlerRuntime(FakeProviderContext(provider))
+
+    async def fake_sleep(delay):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    sub = Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="override",
+        handlers=[
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "keep only important", "input_scope": "both"},
+            }
+        ],
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=EntryContentContext(
+            title="title",
+            summary="summary",
+            content="content",
+            link="https://example.com/entry",
+            author="author",
+            feed_title="Feed",
+            feed_link="https://example.com/feed.xml",
+            raw_xml="<item>raw</item>",
+        ),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["name"] == "ai_filter"
+    assert result.trace[0]["status"] == "ok"
+    assert result.trace[0]["reason"] == "广告"
+    assert provider.calls == 3
 
 
 @pytest.mark.asyncio

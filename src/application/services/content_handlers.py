@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, replace
 from typing import Any
@@ -504,14 +505,13 @@ class ContentHandlerRuntime:
             f"\n用户要求:\n{prompt}"
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
-        response = await provider.text_chat(
+        payload = await self._chat_with_backoff(
+            provider=provider,
             prompt=request_prompt,
-            session_id=session_id or "rsshub-handlers",
-            contexts=[],
-            persist=False,
+            session_id=session_id,
             system_prompt=self._resolve_system_prompt(),
+            label="ai_transform",
         )
-        payload = str(getattr(response, "completion_text", "") or "").strip()
         parsed = self._parse_transform_json(
             payload, required_fields={"title", "summary", "content"}
         )
@@ -670,6 +670,51 @@ class ContentHandlerRuntime:
             reason = reason[:reason_max_length].rstrip()
         return bool(parsed["allow"]), reason
 
+    async def _chat_with_backoff(
+        self,
+        *,
+        provider: Any,
+        prompt: str,
+        session_id: str | None,
+        system_prompt: str | None = None,
+        max_attempts: int = 3,
+        base_delay: float = 1.5,
+        label: str = "provider",
+    ) -> str:
+        """调用 provider.text_chat，对瞬时异常（限流/网络/超时）指数退避重试。
+
+        Returns:
+            completion_text 字符串；达到上限后抛出最后一次异常，由外层
+            per-handler except 记录 error trace 并 fail-open，语义不变。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await provider.text_chat(
+                    prompt=prompt,
+                    session_id=session_id or "rsshub-handlers",
+                    contexts=[],
+                    persist=False,
+                    system_prompt=system_prompt,
+                )
+                return str(getattr(response, "completion_text", "") or "").strip()
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    break
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "%s 调用失败（第 %s/%s 次）：%s；%.1fs 后重试",
+                    label,
+                    attempt,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
+
     async def _call_filter_once(
         self,
         *,
@@ -682,14 +727,13 @@ class ContentHandlerRuntime:
         Returns:
             (解析后的 JSON 对象, 失败原因)；成功时失败原因为空字符串。
         """
-        response = await provider.text_chat(
+        payload = await self._chat_with_backoff(
+            provider=provider,
             prompt=request_prompt,
-            session_id=session_id or "rsshub-handlers",
-            contexts=[],
-            persist=False,
+            session_id=session_id,
             system_prompt=self._resolve_system_prompt(),
+            label="ai_filter",
         )
-        payload = str(getattr(response, "completion_text", "") or "").strip()
         if not payload:
             logger.warning("ai_filter 放行：AI 返回为空")
             return None, "empty response"
@@ -704,16 +748,13 @@ class ContentHandlerRuntime:
             '格式为 {"allow":true,"reason":"..."}，不要包含 Markdown 代码块、'
             "解释文字或任何其他内容。"
         )
-        retry_response = await provider.text_chat(
+        retry_payload = await self._chat_with_backoff(
+            provider=provider,
             prompt=retry_prompt,
-            session_id=session_id or "rsshub-handlers",
-            contexts=[],
-            persist=False,
+            session_id=session_id,
             system_prompt=self._resolve_system_prompt(),
+            label="ai_filter",
         )
-        retry_payload = str(
-            getattr(retry_response, "completion_text", "") or ""
-        ).strip()
         if not retry_payload:
             return None, "empty response"
         retry_parsed = _extract_json_object(retry_payload)
