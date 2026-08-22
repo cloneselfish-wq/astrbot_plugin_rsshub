@@ -24,6 +24,11 @@ def test_conf_schema_is_scoped_to_startup_credentials_and_sender_strategies():
     assert content_handler_items["ai_provider_id"]["default"] == ""
     assert content_handler_items["ai_persona_id"]["_special"] == "select_persona"
     assert content_handler_items["ai_persona_id"]["default"] == ""
+    assert content_handler_items["ai_fallback_providers"]["type"] == "list"
+    assert content_handler_items["ai_fallback_providers"]["default"] == []
+    assert (
+        content_handler_items["ai_fallback_providers"]["items"]["type"] == "string"
+    )
 
     route_knowledge_items = schema["route_knowledge"]["items"]
     assert route_knowledge_items["kb_name"]["default"] == "RSSHub Routes"

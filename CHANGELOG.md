@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.0] - 2026-08-22
+
+### Added
+
+- **AI 内容处理回退 provider 链（fallback models）**：新增配置 `content_handlers.ai_fallback_providers`（provider ID 列表，顺序即切换顺序）。当 `ai_filter` / `ai_transform` 使用的主对话模型连续失败（如限流、接口异常）时，插件按列表顺序切换到下一个回退 provider 继续调用，不再一限流就在推送历史里堆 `状态: error`。候选链为 `[主 provider, *回退 provider]`：
+  - 每个候选 provider 内部仍先做指数退避重试（默认最多 3 次、退避 1.5s / 3s），**瞬时**错误不触发切换，只在单 provider **连续**失败时切下一个。
+  - 回退链按 provider 身份去重；主 provider 解析失败（配置的 `ai_provider_id` 不可用）时仍会使用可用的回退项，避免单点配置错误让过滤/改写整体失效；`ai_provider_id` 留空时主 provider 走会话/全局默认，回退列表仍生效。
+  - 全部候选失败才记录 `error` trace 并照旧 fail-open，推送链路不阻断。
+  - `scope=xml` 改写走 AstrBot agent runner（自带回退聊天模型链），不参与插件级切换。
+  - 配置留空则完全保持 v2.2.0 行为（单主模型 + 退避重试）。
+
+### Notes
+
+- 不新增聊天命令或 Web API；存量配置无需迁移（schema 自愈会自动补 `ai_fallback_providers: []`）。Provider ID 手动填入，与 `ai_provider_id` 同格式（可在 AstrBot 服务商配置页查看）。
+
 ## [2.2.0] - 2026-08-22
 
 ### Added

@@ -232,6 +232,9 @@ def _build_content_handler_settings(value: Any) -> ContentHandlerSettings:
     return ContentHandlerSettings(
         ai_provider_id=str(_get_value(value, "ai_provider_id", "") or ""),
         ai_persona_id=str(_get_value(value, "ai_persona_id", "") or ""),
+        ai_fallback_providers=_as_tuple(
+            _get_value(value, "ai_fallback_providers", None)
+        ),
     )
 
 

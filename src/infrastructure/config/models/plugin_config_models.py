@@ -261,6 +261,21 @@ class ContentHandlersConfig(BaseModel):
 
     ai_provider_id: str = Field(default="", description="AI Provider ID")
     ai_persona_id: str = Field(default="", description="AI Persona ID")
+    ai_fallback_providers: list[str] = Field(
+        default_factory=list, description="AI 回退 Provider ID 列表"
+    )
+
+    @field_validator("ai_fallback_providers", mode="before")
+    @classmethod
+    def normalize_ai_fallback_providers(cls, value: Any) -> list[str]:
+        # 防御 from_astrbot_config 收到裸字符串 / None / 元组等情况。
+        if value is None or isinstance(value, bool):
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.replace(",", "\n").splitlines() if part.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ContentHandlersConfig:

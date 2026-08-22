@@ -158,6 +158,34 @@ class FakeProviderSelectorContext:
         return FakeProviderResponse(self.selected_provider.completion_text)
 
 
+class FakeProviderPool:
+    """按 id 返回不同 provider 的上下文，用于验证回退链按序切换。"""
+
+    def __init__(
+        self,
+        *,
+        providers: dict[str, FakeProvider],
+        default_provider: FakeProvider | None = None,
+    ) -> None:
+        self.providers = providers
+        self.default_provider = default_provider
+        self.requested_provider_ids = []
+        self.persona_manager = self
+
+    def get_using_provider(self, session_id=None):
+        return self.default_provider
+
+    def get_provider_by_id(self, provider_id):
+        self.requested_provider_ids.append(provider_id)
+        return self.providers.get(provider_id)
+
+    def get_persona_v3_by_id(self, persona_id):
+        return {"name": persona_id, "prompt": "persona system prompt"}
+
+    async def tool_loop_agent(self, **kwargs):
+        return FakeProviderResponse("")
+
+
 def test_content_handler_runtime_resolves_handlers_mode_semantics():
     runtime = ContentHandlerRuntime()
     user = User(id="user-1", handlers=[])
@@ -295,7 +323,7 @@ async def test_chat_with_backoff_retries_transient_errors(monkeypatch):
     monkeypatch.setattr("asyncio.sleep", fake_sleep)
 
     text = await runtime._chat_with_backoff(
-        provider=provider,
+        providers=[provider],
         prompt="prompt",
         session_id="session-1",
         max_attempts=3,
@@ -323,7 +351,7 @@ async def test_chat_with_backoff_raises_after_max_attempts(monkeypatch):
 
     with pytest.raises(RuntimeError, match="请求过于频繁"):
         await runtime._chat_with_backoff(
-            provider=provider,
+            providers=[provider],
             prompt="prompt",
             session_id="session-1",
             max_attempts=3,
@@ -522,6 +550,226 @@ async def test_ai_handlers_use_global_provider_and_persona_system_prompt():
     assert context.requested_provider_ids == ["provider-1"]
     assert default_provider.prompts == []
     assert selected_provider.prompts[0]["system_prompt"] == "persona system prompt"
+
+
+def _make_filter_sub(handlers=None):
+    return Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="override",
+        handlers=handlers
+        or [
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "keep only important", "input_scope": "both"},
+            }
+        ],
+    )
+
+
+def _make_entry():
+    return EntryContentContext(
+        title="title",
+        summary="summary",
+        content="content",
+        link="https://example.com/entry",
+        author="author",
+        feed_title="Feed",
+        feed_link="https://example.com/feed.xml",
+        raw_xml="<item>raw</item>",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_falls_back_to_next_provider_on_persistent_failure(
+    monkeypatch,
+):
+    # 主 provider 连续失败（超过退避次数）→ 按顺序切换到回退 provider 并成功
+    primary = FlakyProvider("", fail_times=99)
+    fallback = FakeProvider('{"allow":false,"reason":"广告"}')
+    context = FakeProviderPool(
+        providers={"primary": primary, "fallback": fallback},
+        default_provider=None,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="primary",
+            ai_fallback_providers=("fallback",),
+        ),
+    )
+
+    async def fake_sleep(delay):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = await runtime.process_entry_with_trace(
+        subscription=_make_filter_sub(),
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["status"] == "ok"
+    assert result.trace[0]["reason"] == "广告"
+    assert primary.calls == 3  # 主 provider 退避次数耗尽
+    assert len(fallback.prompts) == 1  # 回退 provider 接管
+    assert context.requested_provider_ids == ["primary", "fallback"]
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_does_not_switch_on_transient_error(monkeypatch):
+    # 瞬时限流被主 provider 的退避重试吸收 → 不切换到回退 provider
+    primary = FlakyProvider('{"allow":false,"reason":"主模型判定"}', fail_times=2)
+    fallback = FakeProvider('{"allow":true,"reason":"不该被调用"}')
+    context = FakeProviderPool(
+        providers={"primary": primary, "fallback": fallback},
+        default_provider=None,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="primary",
+            ai_fallback_providers=("fallback",),
+        ),
+    )
+
+    async def fake_sleep(delay):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = await runtime.process_entry_with_trace(
+        subscription=_make_filter_sub(),
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["status"] == "ok"
+    assert result.trace[0]["reason"] == "主模型判定"
+    assert primary.calls == 3  # 第 3 次成功，未耗尽切换
+    assert fallback.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_all_fallbacks_fail_records_error_trace(monkeypatch):
+    # 主 + 回退都连续失败 → per-handler 记 error trace 并 fail-open
+    primary = FlakyProvider("", fail_times=99)
+    fallback = FlakyProvider("", fail_times=99)
+    context = FakeProviderPool(
+        providers={"primary": primary, "fallback": fallback},
+        default_provider=None,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="primary",
+            ai_fallback_providers=("fallback",),
+        ),
+    )
+
+    async def fake_sleep(delay):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = await runtime.process_entry_with_trace(
+        subscription=_make_filter_sub(),
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.allow is True  # fail-open
+    assert result.trace[0]["name"] == "ai_filter"
+    assert result.trace[0]["status"] == "error"
+    assert "请求过于频繁" in result.trace[0]["reason"]
+    assert primary.calls == 3
+    assert fallback.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_dedups_provider_appearing_in_primary_and_fallback():
+    # 同一个 provider 同时出现在主与回退列表 → 只保留一次，只调用一次
+    provider = FakeProvider('{"allow":false,"reason":"唯一"}')
+    context = FakeProviderPool(providers={"p": provider}, default_provider=None)
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="p",
+            ai_fallback_providers=("p",),
+        ),
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=_make_filter_sub(),
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["status"] == "ok"
+    assert len(provider.prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_unresolvable_primary_falls_back_to_configured_fallback():
+    # 配置的主 provider id 不可解析时，回退到可用的 fallback 而不是整体失败
+    fallback = FakeProvider('{"allow":false,"reason":"回退接管"}')
+    context = FakeProviderPool(providers={"fallback": fallback}, default_provider=None)
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="dead-id",
+            ai_fallback_providers=("fallback",),
+        ),
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=_make_filter_sub(),
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.allow is False
+    assert result.trace[0]["status"] == "ok"
+    assert result.trace[0]["reason"] == "回退接管"
+    assert context.requested_provider_ids == ["dead-id", "fallback"]
+
+
+@pytest.mark.asyncio
+async def test_ai_filter_empty_provider_id_uses_session_default_with_fallback():
+    # ai_provider_id 留空时主 provider 走会话/全局默认，回退列表仍然生效
+    default_provider = FakeProvider('{"allow":true,"reason":"默认"}')
+    fallback = FakeProvider('{"allow":false,"reason":"回退"}')
+    context = FakeProviderPool(
+        providers={"fallback": fallback},
+        default_provider=default_provider,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="",
+            ai_fallback_providers=("fallback",),
+        ),
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=_make_filter_sub(),
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.allow is True
+    assert result.trace[0]["status"] == "ok"
+    assert result.trace[0]["reason"] == "默认"
+    assert default_provider.prompts
+    assert fallback.prompts == []
 
 
 @pytest.mark.asyncio

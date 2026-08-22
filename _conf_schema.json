@@ -483,6 +483,15 @@
         "_special": "select_persona",
         "hint": "可选；选择后仅把该人格 system prompt 注入内置 AI handler，不改变会话人格",
         "default": ""
+      },
+      "ai_fallback_providers": {
+        "type": "list",
+        "description": "AI 内容处理回退 Provider ID 列表",
+        "hint": "主 Provider 连续失败后按列表顺序切换；留空保持原有行为。手动填入 Provider ID（与 ai_provider_id 同格式，可在 AstrBot 服务商配置页查看）",
+        "default": [],
+        "items": {
+          "type": "string"
+        }
       }
     }
   }

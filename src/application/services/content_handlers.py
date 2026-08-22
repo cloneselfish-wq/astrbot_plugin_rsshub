@@ -435,8 +435,8 @@ class ContentHandlerRuntime:
                 },
             }
 
-        provider = self._resolve_provider(session_id=session_id)
-        if provider is None:
+        providers = self._resolve_provider_chain(session_id=session_id)
+        if not providers:
             logger.warning("ai_transform 跳过：当前没有可用的对话模型 provider")
             return {
                 "entry": entry,
@@ -459,7 +459,7 @@ class ContentHandlerRuntime:
             user_id=user_id,
         )
         provider_id = self._resolve_chat_provider_id(
-            provider=provider,
+            provider=providers[0],
             session_id=session_id,
         )
         if not provider_id:
@@ -475,7 +475,7 @@ class ContentHandlerRuntime:
         return await self._run_ai_transform_plaintext(
             entry=entry,
             prompt=prompt,
-            provider=provider,
+            providers=providers,
             session_id=session_id,
         )
 
@@ -484,7 +484,7 @@ class ContentHandlerRuntime:
         *,
         entry: EntryContentContext,
         prompt: str,
-        provider: Provider,
+        providers: list[Provider],
         session_id: str | None = None,
     ) -> dict[str, Any]:
         source_payload = {
@@ -506,7 +506,7 @@ class ContentHandlerRuntime:
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
         payload = await self._chat_with_backoff(
-            provider=provider,
+            providers=providers,
             prompt=request_prompt,
             session_id=session_id,
             system_prompt=self._resolve_system_prompt(),
@@ -611,8 +611,8 @@ class ContentHandlerRuntime:
         if not prompt or self._context is None:
             return True, "ai_filter 未配置 prompt 或 provider 上下文"
 
-        provider = self._resolve_provider(session_id=session_id)
-        if provider is None:
+        providers = self._resolve_provider_chain(session_id=session_id)
+        if not providers:
             logger.warning("ai_filter 放行：当前没有可用的对话模型 provider")
             return True, "provider unavailable"
 
@@ -648,7 +648,7 @@ class ContentHandlerRuntime:
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
         parsed, failure_reason = await self._call_filter_once(
-            provider=provider,
+            providers=providers,
             request_prompt=request_prompt,
             session_id=session_id,
         )
@@ -673,7 +673,7 @@ class ContentHandlerRuntime:
     async def _chat_with_backoff(
         self,
         *,
-        provider: Any,
+        providers: list[Any],
         prompt: str,
         session_id: str | None,
         system_prompt: str | None = None,
@@ -681,54 +681,71 @@ class ContentHandlerRuntime:
         base_delay: float = 1.5,
         label: str = "provider",
     ) -> str:
-        """调用 provider.text_chat，对瞬时异常（限流/网络/超时）指数退避重试。
+        """按 provider 顺序调用 text_chat：先对瞬时异常指数退避重试，
+        单 provider 连续失败后切换到下一个回退 provider。
+
+        Args:
+            providers: 有序候选链（[主, *回退]），按顺序尝试。
+            max_attempts: 每个 provider 的重试次数。
+            base_delay: 首次退避延迟，之后 2 倍递增。
 
         Returns:
-            completion_text 字符串；达到上限后抛出最后一次异常，由外层
-            per-handler except 记录 error trace 并 fail-open，语义不变。
+            completion_text 字符串；全部 provider 失败后抛出最后一次异常，
+            由外层 per-handler except 记录 error trace 并 fail-open，语义不变。
         """
         last_exc: Exception | None = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = await provider.text_chat(
-                    prompt=prompt,
-                    session_id=session_id or "rsshub-handlers",
-                    contexts=[],
-                    persist=False,
-                    system_prompt=system_prompt,
-                )
-                return str(getattr(response, "completion_text", "") or "").strip()
-            except Exception as exc:
-                last_exc = exc
-                if attempt >= max_attempts:
-                    break
-                delay = base_delay * (2 ** (attempt - 1))
-                logger.warning(
-                    "%s 调用失败（第 %s/%s 次）：%s；%.1fs 后重试",
-                    label,
-                    attempt,
-                    max_attempts,
-                    exc,
-                    delay,
-                )
-                await asyncio.sleep(delay)
+        for provider in providers:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await provider.text_chat(
+                        prompt=prompt,
+                        session_id=session_id or "rsshub-handlers",
+                        contexts=[],
+                        persist=False,
+                        system_prompt=system_prompt,
+                    )
+                    return str(getattr(response, "completion_text", "") or "").strip()
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= max_attempts:
+                        if len(providers) > 1:
+                            logger.warning(
+                                "%s 在 %s 连续失败，切换下一个回退 provider：%s",
+                                label,
+                                self._provider_identity(provider) or "provider",
+                                exc,
+                            )
+                        break
+                    delay = base_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "%s 调用失败（第 %s/%s 次）：%s；%.1fs 后重试",
+                        label,
+                        attempt,
+                        max_attempts,
+                        exc,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
         assert last_exc is not None
         raise last_exc
 
     async def _call_filter_once(
         self,
         *,
-        provider: Any,
+        providers: list[Any],
         request_prompt: str,
         session_id: str | None,
     ) -> tuple[dict[str, Any] | None, str]:
         """调用一次过滤判定，容忍非 JSON 输出并重试一次。
 
+        Args:
+            providers: 有序候选链（[主, *回退]），失败时按顺序切换。
+
         Returns:
             (解析后的 JSON 对象, 失败原因)；成功时失败原因为空字符串。
         """
         payload = await self._chat_with_backoff(
-            provider=provider,
+            providers=providers,
             prompt=request_prompt,
             session_id=session_id,
             system_prompt=self._resolve_system_prompt(),
@@ -749,7 +766,7 @@ class ContentHandlerRuntime:
             "解释文字或任何其他内容。"
         )
         retry_payload = await self._chat_with_backoff(
-            provider=provider,
+            providers=providers,
             prompt=retry_prompt,
             session_id=session_id,
             system_prompt=self._resolve_system_prompt(),
@@ -885,9 +902,15 @@ class ContentHandlerRuntime:
         provider: Provider,
         session_id: str | None,
     ) -> str:
-        provider_id = self._settings.ai_provider_id.strip()
-        if provider_id:
-            return provider_id
+        configured_id = self._settings.ai_provider_id.strip()
+        if configured_id:
+            identity = self._provider_identity(provider)
+            # 传进来的就是配置的主 provider → 用配置 id；
+            # 否则（如主 id 不可解析时退到回退 provider）返回它自己的 id，
+            # 避免把不可解析的主 id 喂给 tool_loop_agent。
+            if not identity or identity == configured_id:
+                return configured_id
+            return identity
         meta = getattr(provider, "meta", None)
         if callable(meta):
             try:
@@ -896,13 +919,86 @@ class ContentHandlerRuntime:
                 return ""
         return ""
 
+    def _provider_identity(self, provider: Provider) -> str:
+        """返回 provider 的稳定标识，用于回退链去重；取不到时返回空串。"""
+        meta = getattr(provider, "meta", None)
+        if callable(meta):
+            try:
+                provider_id = str(meta().id or "").strip()
+                if provider_id:
+                    return provider_id
+            except Exception:
+                pass
+        provider_config = getattr(provider, "provider_config", None)
+        if isinstance(provider_config, dict):
+            provider_id = str(provider_config.get("id") or "").strip()
+            if provider_id:
+                return provider_id
+        raw_id = getattr(provider, "id", None)
+        if raw_id:
+            return str(raw_id).strip()
+        return ""
+
+    def _resolve_provider_by_id(self, provider_id: str) -> Provider | None:
+        """按 id 解析 provider，校验 text_chat 可调用；失败返回 None。"""
+        getter_by_id = getattr(self._context, "get_provider_by_id", None)
+        if getter_by_id is not None:
+            try:
+                provider = getter_by_id(provider_id)
+                if callable(getattr(provider, "text_chat", None)):
+                    return provider
+            except Exception:
+                pass
+        provider_manager = getattr(self._context, "provider_manager", None)
+        getter = getattr(provider_manager, "get_provider_by_id", None)
+        if getter is not None:
+            try:
+                provider = getter(provider_id)
+                if callable(getattr(provider, "text_chat", None)):
+                    return provider
+            except Exception:
+                pass
+        return None
+
+    def _resolve_provider_chain(self, *, session_id: str | None = None) -> list[Provider]:
+        """按配置顺序返回 [主 provider, *回退 provider]，去重、跳过不可解析项。
+
+        - 主 provider 解析失败（如配置的 ai_provider_id 不可用）时仍保留回退项，
+          避免单点配置错误导致 filter/transform 整体不可用。
+        - 同一 provider 只保留一次（按 _provider_identity 去重；身份为空不去重，
+          保证不同对象不被折叠成一个）。
+        """
+        chain: list[Provider] = []
+        seen: set[str] = set()
+
+        primary = self._resolve_provider(session_id=session_id)
+        fallback_providers: list[Provider] = []
+        for fallback_id in self._settings.ai_fallback_providers:
+            fallback_id = str(fallback_id or "").strip()
+            if not fallback_id:
+                continue
+            fallback = self._resolve_provider_by_id(fallback_id)
+            if fallback is None:
+                logger.warning("ai 回退 provider %s 无法解析，已跳过", fallback_id)
+                continue
+            fallback_providers.append(fallback)
+
+        for provider in (
+            [primary] if primary is not None else []
+        ) + fallback_providers:
+            identity = self._provider_identity(provider)
+            if identity:
+                if identity in seen:
+                    continue
+                seen.add(identity)
+            chain.append(provider)
+        return chain
+
     def _resolve_provider(self, *, session_id: str | None = None) -> Provider | None:
         provider = None
         provider_id = self._settings.ai_provider_id.strip()
         if provider_id:
-            getter_by_id = getattr(self._context, "get_provider_by_id", None)
-            if getter_by_id is not None:
-                provider = getter_by_id(provider_id)
+            provider = self._resolve_provider_by_id(provider_id)
         if provider is None:
             getter = getattr(self._context, "get_using_provider", None)
             if getter is None:

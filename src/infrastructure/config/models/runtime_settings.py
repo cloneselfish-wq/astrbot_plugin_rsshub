@@ -103,6 +103,7 @@ class ContentHandlerSettings:
 
     ai_provider_id: str = ""
     ai_persona_id: str = ""
+    ai_fallback_providers: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

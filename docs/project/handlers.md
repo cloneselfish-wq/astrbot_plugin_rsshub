@@ -144,6 +144,16 @@ RSS 推送是持续型基础设施。AI provider 失败、超时、返回脏 JSO
 
 瞬时限流（”请求过于频繁”）、网络抖动、超时等**瞬时** provider 错误不会直接进入 fail-open：`provider.text_chat` 调用会做指数退避重试（默认最多 3 次，退避 1.5s / 3s），恢复后正常判定与改写；连续失败才记录 `error` trace 并照旧放行。`scope=xml` 的改写走 `tool_loop_agent`，自带工具循环与超时，重复调用可能重复执行工具副作用，因此不套退避。
 
+### 回退 provider 链（fallback models）
+
+配置项 `content_handlers.ai_fallback_providers`（provider ID 列表，顺序即切换顺序）可为主模型加一层容错：候选链为 `[主 provider, *回退 provider]`，按顺序尝试。
+
+- 每个候选 provider 内部仍先做指数退避（最多 3 次）；**单 provider 连续失败**才切到下一个回退 provider，瞬时限流不会触发切换。
+- 回退链按 provider 身份去重；主 provider 解析失败（如配置的 `ai_provider_id` 不可用）时仍保留可用的回退项，避免单点配置错误让 filter/transform 整体失效。
+- `ai_provider_id` 留空时主 provider 取会话/全局默认 provider，回退列表仍生效。
+- 全部候选失败后照旧抛最后一次异常，由 per-handler except 记录 `error` trace 并 fail-open。
+- `scope=xml` 只取链中第一个可用 provider，不参与插件级切换；其 agent runner 自 AstrBot v4.17.1 起自带回退聊天模型链。
+
 ## trace 的价值
 
 每个 handler 不单独创建一条 push history，而是把摘要记录进当前 history 的 `handler_trace`。

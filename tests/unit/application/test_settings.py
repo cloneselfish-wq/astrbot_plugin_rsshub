@@ -388,6 +388,7 @@ def test_heal_astrbot_plugin_config_projects_dirty_config_to_schema():
     assert healed["content_handlers"] == {
         "ai_provider_id": "",
         "ai_persona_id": "",
+        "ai_fallback_providers": [],
     }
     assert healed["sender_strategies"] == {
         "enabled_platforms": ["telegram", "aiocqhttp", "qq_official"],
@@ -569,6 +570,7 @@ def test_content_handler_ai_config_maps_to_runtime_settings_and_saves():
             "content_handlers": {
                 "ai_provider_id": "provider-1",
                 "ai_persona_id": "persona-1",
+                "ai_fallback_providers": ["fallback-1", "fallback-2"],
             }
         }
     )
@@ -577,6 +579,10 @@ def test_content_handler_ai_config_maps_to_runtime_settings_and_saves():
 
     assert settings.content_handlers.ai_provider_id == "provider-1"
     assert settings.content_handlers.ai_persona_id == "persona-1"
+    assert settings.content_handlers.ai_fallback_providers == (
+        "fallback-1",
+        "fallback-2",
+    )
 
     astrbot_config = FakeAstrBotConfig()
     config.save(astrbot_config)
@@ -585,6 +591,7 @@ def test_content_handler_ai_config_maps_to_runtime_settings_and_saves():
     assert astrbot_config["content_handlers"] == {
         "ai_provider_id": "provider-1",
         "ai_persona_id": "persona-1",
+        "ai_fallback_providers": ["fallback-1", "fallback-2"],
     }
 
 
