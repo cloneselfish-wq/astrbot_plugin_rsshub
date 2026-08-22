@@ -140,7 +140,9 @@ RSS 推送是持续型基础设施。AI provider 失败、超时、返回脏 JSO
 - 用户很难判断是源没更新还是模型坏了
 - 大量推送 history 卡在失败态
 
-所以这里明确采用“AI 是增强层，不是门闸”的策略。只有 `ai_filter` 在成功返回 `allow=false` 时才主动阻断。
+所以这里明确采用”AI 是增强层，不是门闸”的策略。只有 `ai_filter` 在成功返回 `allow=false` 时才主动阻断。
+
+瞬时限流（”请求过于频繁”）、网络抖动、超时等**瞬时** provider 错误不会直接进入 fail-open：`provider.text_chat` 调用会做指数退避重试（默认最多 3 次，退避 1.5s / 3s），恢复后正常判定与改写；连续失败才记录 `error` trace 并照旧放行。`scope=xml` 的改写走 `tool_loop_agent`，自带工具循环与超时，重复调用可能重复执行工具副作用，因此不套退避。
 
 ## trace 的价值
 
