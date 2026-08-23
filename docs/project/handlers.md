@@ -173,3 +173,4 @@ RSS 推送是持续型基础设施。AI provider 失败、超时、返回脏 JSO
 - `steps_used`
 - `fallback`
 - `fallback_reason`
+- `model_id`：该步最终实际调用的 provider id（`ai_filter` / `ai_transform` 命中回退链时记录接管成功的那个；失败放行或未调用 AI 时无此键）

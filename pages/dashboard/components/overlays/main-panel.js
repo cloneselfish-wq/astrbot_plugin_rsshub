@@ -124,6 +124,7 @@ export const mainPanelTemplate = String.raw`
         <h4>基础信息</h4>
         <div class="detail-row"><span class="detail-label">状态</span><span class="detail-value"><span class="status-badge" :class="historyDetail.status">{{ historyDetail.status }}</span></span></div>
         <div class="detail-row" v-if="historyLlmReason(historyDetail)"><span class="detail-label">LLM 判定</span><span class="detail-value cell-wrap llm-reason">{{ historyLlmReason(historyDetail) }}</span></div>
+        <div class="detail-row"><span class="detail-label">模型</span><span class="detail-value cell-mono">{{ historyModelId(historyDetail) || '-' }}</span></div>
         <div class="detail-row"><span class="detail-label">来源</span><span class="detail-value">{{ historyDetail.source_type || 'feed' }} / {{ historyDetail.source_key || '-' }}</span></div>
         <div class="detail-row"><span class="detail-label">用户</span><span class="detail-value">{{ historyDetail.user_id }}</span></div>
         <div class="detail-row"><span class="detail-label">Feed</span><span class="detail-value">{{ historyDetail.feed_title || '-' }}</span></div>
@@ -149,7 +150,7 @@ export const mainPanelTemplate = String.raw`
         <div v-else>
           <div v-for="(step, index) in historyTraceSteps()" :key="step.id || step.name || index" class="entry-item">
             <div class="entry-title">{{ step.name || step.id || '未知 Handler' }}</div>
-            <div class="entry-meta">状态: {{ historyTraceStatus(step) }} · {{ step.type || 'builtin' }}</div>
+            <div class="entry-meta">状态: {{ historyTraceStatus(step) }} · {{ step.type || 'builtin' }}<template v-if="step.model_id"> · 模型: {{ step.model_id }}</template></div>
             <div class="entry-summary" v-if="historyTraceReason(step)">{{ historyTraceReason(step) }}</div>
             <div class="entry-summary" v-if="step.config">{{ prettyJson(step.config) }}</div>
           </div>

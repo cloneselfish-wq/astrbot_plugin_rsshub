@@ -5,7 +5,8 @@ import {
   createEditFormFromSub,
   traceStatusText,
   traceReasonText,
-  llmReasonText
+  llmReasonText,
+  historyModelIdText
 } from '../helpers.js';
 
 export const panelsModule = {
@@ -79,5 +80,10 @@ export const panelsModule = {
   // 每条推送记录（含被跳过的）的 LLM 判定原因，取自 handler_trace 中的 ai_filter 步骤。
   historyLlmReason(history) {
     return llmReasonText(history);
+  },
+
+  // 推送记录最终实际调用的模型（provider）id，取自 handler_trace 的 model_id。
+  historyModelId(history) {
+    return historyModelIdText(history);
   }
 };

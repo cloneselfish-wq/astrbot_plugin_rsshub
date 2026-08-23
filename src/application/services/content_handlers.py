@@ -338,24 +338,25 @@ class ContentHandlerRuntime:
                 continue
             try:
                 if spec.name == "ai_filter":
-                    allowed, reason = await self._run_ai_filter(
+                    allowed, reason, model_id = await self._run_ai_filter(
                         result,
                         spec.config,
                         session_id=session_id,
                     )
-                    trace.append(
-                        {
-                            "id": spec.id,
-                            "name": spec.name,
-                            "status": HandlerTraceStatus.OK.value,
-                            "allow": allowed,
-                            "reason": reason,
-                            "scope": str(
-                                spec.config.get("input_scope")
-                                or AiFilterInputScope.TEXT.value
-                            ),
-                        }
-                    )
+                    filter_trace: dict[str, Any] = {
+                        "id": spec.id,
+                        "name": spec.name,
+                        "status": HandlerTraceStatus.OK.value,
+                        "allow": allowed,
+                        "reason": reason,
+                        "scope": str(
+                            spec.config.get("input_scope")
+                            or AiFilterInputScope.TEXT.value
+                        ),
+                    }
+                    if model_id:
+                        filter_trace["model_id"] = model_id
+                    trace.append(filter_trace)
                     if not allowed:
                         return HandlerProcessResult(
                             entry=result,
@@ -505,7 +506,7 @@ class ContentHandlerRuntime:
             f"\n用户要求:\n{prompt}"
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
-        payload = await self._chat_with_backoff(
+        payload, model_id = await self._chat_with_backoff(
             providers=providers,
             prompt=request_prompt,
             session_id=session_id,
@@ -518,6 +519,13 @@ class ContentHandlerRuntime:
         title = str(parsed.get("title") or entry.title).strip()
         summary = str(parsed.get("summary") or entry.summary).strip()
         content = str(parsed.get("content") or entry.content).strip()
+        transform_trace: dict[str, Any] = {
+            "scope": AiTransformScope.PLAINTEXT.value,
+            "steps_used": 1,
+            "fallback": False,
+        }
+        if model_id:
+            transform_trace["model_id"] = model_id
         return {
             "entry": replace(
                 entry,
@@ -525,11 +533,7 @@ class ContentHandlerRuntime:
                 summary=summary or entry.summary,
                 content=content or entry.content,
             ),
-            "trace": {
-                "scope": AiTransformScope.PLAINTEXT.value,
-                "steps_used": 1,
-                "fallback": False,
-            },
+            "trace": transform_trace,
         }
 
     async def _run_ai_transform_xml(
@@ -591,13 +595,16 @@ class ContentHandlerRuntime:
             len(getattr(response, "tools_call_name", []) or []) + 1,
             1,
         )
+        transform_trace: dict[str, Any] = {
+            "scope": AiTransformScope.XML.value,
+            "steps_used": steps_used,
+            "fallback": False,
+        }
+        if provider_id:
+            transform_trace["model_id"] = provider_id
         return {
             "entry": reparsed_entry,
-            "trace": {
-                "scope": AiTransformScope.XML.value,
-                "steps_used": steps_used,
-                "fallback": False,
-            },
+            "trace": transform_trace,
         }
 
     async def _run_ai_filter(
@@ -606,15 +613,15 @@ class ContentHandlerRuntime:
         config: dict[str, Any],
         *,
         session_id: str | None = None,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, str]:
         prompt = str((config or {}).get("prompt") or "").strip()
         if not prompt or self._context is None:
-            return True, "ai_filter 未配置 prompt 或 provider 上下文"
+            return True, "ai_filter 未配置 prompt 或 provider 上下文", ""
 
         providers = self._resolve_provider_chain(session_id=session_id)
         if not providers:
             logger.warning("ai_filter 放行：当前没有可用的对话模型 provider")
-            return True, "provider unavailable"
+            return True, "provider unavailable", ""
 
         input_scope = self._normalize_filter_scope((config or {}).get("input_scope"))
         source_payload = {
@@ -647,7 +654,7 @@ class ContentHandlerRuntime:
             f"\n用户要求:\n{prompt}"
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
-        parsed, failure_reason = await self._call_filter_once(
+        parsed, failure_reason, provider_id = await self._call_filter_once(
             providers=providers,
             request_prompt=request_prompt,
             session_id=session_id,
@@ -657,10 +664,10 @@ class ContentHandlerRuntime:
                 "ai_filter 放行：%s（重试一次后仍失败，按放行处理）",
                 failure_reason,
             )
-            return True, failure_reason
+            return True, failure_reason, ""
         if not isinstance(parsed, dict) or not isinstance(parsed.get("allow"), bool):
             logger.warning("ai_filter 放行：AI 返回结构无效")
-            return True, "invalid schema"
+            return True, "invalid schema", provider_id
         reason = str(parsed.get("reason") or "").strip()
         try:
             reason_max_length = int((config or {}).get("reason_max_length") or 120)
@@ -668,7 +675,7 @@ class ContentHandlerRuntime:
             reason_max_length = 120
         if reason_max_length > 0 and len(reason) > reason_max_length:
             reason = reason[:reason_max_length].rstrip()
-        return bool(parsed["allow"]), reason
+        return bool(parsed["allow"]), reason, provider_id
 
     async def _chat_with_backoff(
         self,
@@ -680,7 +687,7 @@ class ContentHandlerRuntime:
         max_attempts: int = 3,
         base_delay: float = 1.5,
         label: str = "provider",
-    ) -> str:
+    ) -> tuple[str, str]:
         """按 provider 顺序调用 text_chat：先对瞬时异常指数退避重试，
         单 provider 连续失败后切换到下一个回退 provider。
 
@@ -690,7 +697,8 @@ class ContentHandlerRuntime:
             base_delay: 首次退避延迟，之后 2 倍递增。
 
         Returns:
-            completion_text 字符串；全部 provider 失败后抛出最后一次异常，
+            (completion_text, provider_id) 元组；provider_id 是最终成功调用的
+            provider 身份（可能为空串）。全部 provider 失败后抛出最后一次异常，
             由外层 per-handler except 记录 error trace 并 fail-open，语义不变。
         """
         last_exc: Exception | None = None
@@ -704,7 +712,10 @@ class ContentHandlerRuntime:
                         persist=False,
                         system_prompt=system_prompt,
                     )
-                    return str(getattr(response, "completion_text", "") or "").strip()
+                    return (
+                        str(getattr(response, "completion_text", "") or "").strip(),
+                        self._provider_identity(provider),
+                    )
                 except Exception as exc:
                     last_exc = exc
                     if attempt >= max_attempts:
@@ -735,16 +746,17 @@ class ContentHandlerRuntime:
         providers: list[Any],
         request_prompt: str,
         session_id: str | None,
-    ) -> tuple[dict[str, Any] | None, str]:
+    ) -> tuple[dict[str, Any] | None, str, str]:
         """调用一次过滤判定，容忍非 JSON 输出并重试一次。
 
         Args:
             providers: 有序候选链（[主, *回退]），失败时按顺序切换。
 
         Returns:
-            (解析后的 JSON 对象, 失败原因)；成功时失败原因为空字符串。
+            (解析后的 JSON 对象, 失败原因, provider_id)；成功时失败原因为空字符串，
+            provider_id 为最终成功调用的 provider 身份；失败放行时 provider_id 为空串。
         """
-        payload = await self._chat_with_backoff(
+        payload, provider_id = await self._chat_with_backoff(
             providers=providers,
             prompt=request_prompt,
             session_id=session_id,
@@ -753,10 +765,10 @@ class ContentHandlerRuntime:
         )
         if not payload:
             logger.warning("ai_filter 放行：AI 返回为空")
-            return None, "empty response"
+            return None, "empty response", ""
         parsed = _extract_json_object(payload)
         if parsed is not None:
-            return parsed, ""
+            return parsed, "", provider_id
         # 重试一次：明确要求只返回 JSON
         logger.warning("ai_filter 解析失败，重试一次：AI 返回非 JSON 输出")
         retry_prompt = (
@@ -765,7 +777,7 @@ class ContentHandlerRuntime:
             '格式为 {"allow":true,"reason":"..."}，不要包含 Markdown 代码块、'
             "解释文字或任何其他内容。"
         )
-        retry_payload = await self._chat_with_backoff(
+        retry_payload, retry_provider_id = await self._chat_with_backoff(
             providers=providers,
             prompt=retry_prompt,
             session_id=session_id,
@@ -773,11 +785,11 @@ class ContentHandlerRuntime:
             label="ai_filter",
         )
         if not retry_payload:
-            return None, "empty response"
+            return None, "empty response", ""
         retry_parsed = _extract_json_object(retry_payload)
         if retry_parsed is not None:
-            return retry_parsed, ""
-        return None, "invalid json"
+            return retry_parsed, "", retry_provider_id
+        return None, "invalid json", ""
 
     def _normalize_filter_scope(self, value: Any) -> str:
         normalized = str(value or "").strip()

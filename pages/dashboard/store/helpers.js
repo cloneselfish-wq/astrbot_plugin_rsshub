@@ -377,6 +377,19 @@ export function llmReasonText(history) {
   return '';
 }
 
+// 从推送记录的 handler_trace 中提取最终实际调用的模型（provider）id。
+// filter 与 transform 各占一步时取后执行者（更接近"最终使用"），无则返回空串。
+export function historyModelIdText(history) {
+  const trace = Array.isArray(history?.handler_trace) ? history.handler_trace : [];
+  let modelId = '';
+  for (const step of trace) {
+    if (!step || typeof step !== 'object') continue;
+    const value = String(step.model_id || '').trim();
+    if (value) modelId = value;
+  }
+  return modelId;
+}
+
 export function pieSegments(items) {
   const palette = ['#3c96ca', '#34d399', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#64748b'];
   const normalized = normalizeBreakdownItems(items);

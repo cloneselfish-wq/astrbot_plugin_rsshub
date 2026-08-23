@@ -117,6 +117,11 @@ class FlakyProvider:
         self.fail_times = fail_times
         self.calls = 0
         self.prompts = []
+        # 每个实例独立身份，避免 _resolve_provider_chain 按 identity 去重误折叠
+        self._provider_id = f"flaky-{id(self)}"
+
+    def meta(self):
+        return SimpleNamespace(id=self._provider_id)
 
     async def text_chat(self, **kwargs):
         self.prompts.append(kwargs)
@@ -322,7 +327,7 @@ async def test_chat_with_backoff_retries_transient_errors(monkeypatch):
 
     monkeypatch.setattr("asyncio.sleep", fake_sleep)
 
-    text = await runtime._chat_with_backoff(
+    text, provider_id = await runtime._chat_with_backoff(
         providers=[provider],
         prompt="prompt",
         session_id="session-1",
@@ -332,6 +337,7 @@ async def test_chat_with_backoff_retries_transient_errors(monkeypatch):
     )
 
     assert text == '{"allow":true,"reason":"ok"}'
+    assert provider_id == f"flaky-{id(provider)}"
     assert provider.calls == 3
     assert sleeps == [1.5, 3.0]
 
@@ -617,6 +623,7 @@ async def test_ai_filter_falls_back_to_next_provider_on_persistent_failure(
     assert result.allow is False
     assert result.trace[0]["status"] == "ok"
     assert result.trace[0]["reason"] == "广告"
+    assert result.trace[0]["model_id"] == "fake-provider"  # 记录实际接管成功的 provider
     assert primary.calls == 3  # 主 provider 退避次数耗尽
     assert len(fallback.prompts) == 1  # 回退 provider 接管
     assert context.requested_provider_ids == ["primary", "fallback"]

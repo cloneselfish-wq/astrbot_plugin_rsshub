@@ -113,6 +113,7 @@
 .col-user { width: 180px; }
 .col-interval { width: 88px; }
 .col-session { width: 220px; }
+.col-model { width: 120px; }
 .col-actions { width: 128px; text-align: center; }
 .subs-table .col-feed { width: 36%; }
 .subs-table .col-user { width: 180px; }
@@ -130,6 +131,7 @@
 .history-table .col-feed { width: 32%; }
 .history-table .col-user { width: 180px; }
 .history-table .col-session { width: 240px; }
+.history-table .col-model { width: 140px; }
 .history-table .col-error { width: 260px; }
 .history-table .col-chk { width: 44px; }
 .history-table .col-actions { width: 96px; }

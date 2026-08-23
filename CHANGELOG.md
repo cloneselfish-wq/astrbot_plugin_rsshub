@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.3.1] - 2026-08-23
+
+### Added
+
+- **推送历史展示最终使用的模型（provider）id**：当 `ai_filter` / `ai_transform` 命中回退 provider 链时，`handler_trace` 会新增 `model_id` 字段，记录这条推送 AI 处理最终实际调用的 provider id（含回退后接管成功的那个）。Web 面板推送历史列表新增"模型"列，详情面板"基础信息"新增"模型"行、调用链每步同步展示，方便直接确认"这次是不是用了回退模型"。未启用 AI 处理、provider 不可用或全部候选失败 fail-open 的记录没有 `model_id`，列表显示 `-`。
+
+### Notes
+
+- 纯展示 + trace 字段补充，不新增配置项或聊天命令；`handler_trace` 为 JSON 列，加键无需迁移。存量历史记录没有 `model_id`，显示 `-`。
+
 ## [2.3.0] - 2026-08-22
 
 ### Added
