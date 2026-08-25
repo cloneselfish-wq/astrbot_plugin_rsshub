@@ -46,6 +46,9 @@ class InfrastructureMessageSenderAdapter:
                 else self._sender_strategy
             ),
             bot_self_id=context.bot_self_id if context else "",
+            plain_text_only=(
+                getattr(context, "plain_text_only", False) if context else False
+            ),
         )
         result = await self._sender.send_to_user(
             InfraSendRequest(

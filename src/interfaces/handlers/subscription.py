@@ -5,6 +5,7 @@ from __future__ import annotations
 from astrbot.api.event import AstrMessageEvent
 
 from ...application.services.session_push_queue import SessionPushQueue
+from ...domain.entities.handlers import build_ai_comment_handler
 
 
 def _extract_bot_self_id(event: AstrMessageEvent) -> str:
@@ -25,8 +26,47 @@ def _extract_bot_self_id(event: AstrMessageEvent) -> str:
     return sid
 
 
-async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
-    """订阅 RSS 源"""
+async def _fetch_user_handlers(deps: dict, user_id: str) -> list[dict]:
+    """读取用户当前全局 handlers 快照；读取失败时返回空列表。"""
+    getter = deps.get("get_user_settings_cmd")
+    if getter is None:
+        return []
+    try:
+        user_result = await getter.execute(user_id=user_id)
+    except Exception:
+        return []
+    data = getattr(user_result, "data", None)
+    if data is None:
+        return []
+    raw = data.get("handlers") if isinstance(data, dict) else None
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _merge_default_comment_handlers(user_handlers: list[dict]) -> list[dict]:
+    """用户全局 handlers + 启用的 ai_comment（已有则不重复）。"""
+    merged = list(user_handlers)
+    has_comment = any(
+        str(item.get("name", "")).strip() == "ai_comment" for item in merged
+    )
+    if not has_comment:
+        merged.extend(build_ai_comment_handler())
+    return merged
+
+
+async def handle_sub(
+    event: AstrMessageEvent,
+    url: str,
+    deps: dict,
+    *,
+    with_comment: bool = False,
+) -> dict:
+    """订阅 RSS 源
+
+    ``with_comment=True``（LLM 工具路径）时，把用户当前全局 handlers
+    快照进订阅并追加一个启用的 ai_comment，保证继承语义下全局改写需求
+    不被订阅自带 handlers 覆盖；用户已有 ai_comment 则不重复添加。
+    ``/sub`` 命令保持默认 ``False``，行为不变。
+    """
     if not url:
         return {"plain": "请提供 RSS 源的 URL\n用法: /sub <url>"}
 
@@ -42,6 +82,12 @@ async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
 
     bot_self_id = _extract_bot_self_id(event)
 
+    default_handlers = None
+    if with_comment:
+        default_handlers = _merge_default_comment_handlers(
+            await _fetch_user_handlers(deps, user_id)
+        )
+
     if len(valid_urls) == 1:
         result = await deps["subscribe_cmd"].execute(
             url=valid_urls[0],
@@ -49,6 +95,7 @@ async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
             target_session=target_session,
             platform_name=platform_name,
             bot_self_id=bot_self_id,
+            default_handlers=default_handlers,
         )
         return {"plain": result.message}
 
@@ -60,6 +107,7 @@ async def handle_sub(event: AstrMessageEvent, url: str, deps: dict) -> dict:
             target_session=target_session,
             platform_name=platform_name,
             bot_self_id=bot_self_id,
+            default_handlers=default_handlers,
         )
         results.append(r)
 

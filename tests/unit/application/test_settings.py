@@ -389,6 +389,8 @@ def test_heal_astrbot_plugin_config_projects_dirty_config_to_schema():
         "ai_provider_id": "",
         "ai_persona_id": "",
         "ai_fallback_providers": [],
+        "ai_comment_image_provider_id": "",
+        "ai_comment_pipeline": True,
     }
     assert healed["sender_strategies"] == {
         "enabled_platforms": ["telegram", "aiocqhttp", "qq_official"],
@@ -571,6 +573,7 @@ def test_content_handler_ai_config_maps_to_runtime_settings_and_saves():
                 "ai_provider_id": "provider-1",
                 "ai_persona_id": "persona-1",
                 "ai_fallback_providers": ["fallback-1", "fallback-2"],
+                "ai_comment_image_provider_id": "caption-provider",
             }
         }
     )
@@ -583,6 +586,7 @@ def test_content_handler_ai_config_maps_to_runtime_settings_and_saves():
         "fallback-1",
         "fallback-2",
     )
+    assert settings.content_handlers.ai_comment_image_provider_id == "caption-provider"
 
     astrbot_config = FakeAstrBotConfig()
     config.save(astrbot_config)
@@ -592,6 +596,8 @@ def test_content_handler_ai_config_maps_to_runtime_settings_and_saves():
         "ai_provider_id": "provider-1",
         "ai_persona_id": "persona-1",
         "ai_fallback_providers": ["fallback-1", "fallback-2"],
+        "ai_comment_image_provider_id": "caption-provider",
+        "ai_comment_pipeline": True,
     }
 
 
@@ -1335,3 +1341,213 @@ def test_application_settings_maps_history_retention_days():
     )
 
     assert settings.scheduler.history_retention_days == 7
+
+
+# ─── 订阅「Bot 评论」开关 reconcile ───────────────────────────────
+
+def _fake_user_settings(handlers):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(data={"handlers": handlers})
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_enabled_inherit_empty_merges_user_handlers():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.handlers import (
+        build_ai_comment_handler,
+        build_ai_transform_handler,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+    transform = build_ai_transform_handler("简化一下")[0]
+    repo = AsyncMock()
+    repo.get_by_id.return_value = Subscription(
+        id=1, user_id="u1", feed_id=10, handlers=[], handlers_mode="inherit"
+    )
+    repo.update_options.return_value = Subscription(id=1, user_id="u1", feed_id=10)
+    user_cmd = AsyncMock()
+    user_cmd.execute.return_value = _fake_user_settings([transform])
+
+    cmd = UpdateSubscriptionCommand(repo, get_user_settings_cmd=user_cmd)
+    result = await cmd.execute(sub_id=1, user_id="u1", ai_comment={"enabled": True})
+
+    assert result.success is True
+    expected = [transform, build_ai_comment_handler()[0]]
+    repo.update_options.assert_awaited_once_with(1, "u1", handlers=expected)
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_enabled_override_does_not_merge_user_handlers():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.handlers import (
+        build_ai_comment_handler,
+        build_ai_transform_handler,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+    transform = build_ai_transform_handler("简化一下")[0]
+    repo = AsyncMock()
+    repo.get_by_id.return_value = Subscription(
+        id=1, user_id="u1", feed_id=10, handlers=[transform], handlers_mode="override"
+    )
+    repo.update_options.return_value = Subscription(id=1, user_id="u1", feed_id=10)
+    user_cmd = AsyncMock()
+    user_cmd.execute.return_value = _fake_user_settings([])
+
+    cmd = UpdateSubscriptionCommand(repo, get_user_settings_cmd=user_cmd)
+    result = await cmd.execute(sub_id=1, user_id="u1", ai_comment=True)
+
+    assert result.success is True
+    expected = [transform, build_ai_comment_handler()[0]]
+    repo.update_options.assert_awaited_once_with(1, "u1", handlers=expected)
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_enabled_keeps_other_handlers_and_upserts_prompt():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.handlers import (
+        build_ai_transform_handler,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+    transform = build_ai_transform_handler("简化一下")[0]
+    old_comment = {
+        "id": "builtin.ai_comment.custom",
+        "type": "builtin",
+        "name": "ai_comment",
+        "status": 1,
+        "config": {"prompt": "旧口吻", "with_media": True},
+    }
+    repo = AsyncMock()
+    repo.get_by_id.return_value = Subscription(
+        id=1, user_id="u1", feed_id=10, handlers=[transform, old_comment]
+    )
+    repo.update_options.return_value = Subscription(id=1, user_id="u1", feed_id=10)
+
+    cmd = UpdateSubscriptionCommand(repo)
+    result = await cmd.execute(
+        sub_id=1, user_id="u1", ai_comment={"enabled": True, "prompt": "新口吻"}
+    )
+
+    assert result.success is True
+    handlers = repo.update_options.await_args.kwargs["handlers"]
+    assert handlers[0] == transform
+    assert handlers[1]["name"] == "ai_comment"
+    assert handlers[1]["id"] == "builtin.ai_comment.custom"
+    assert handlers[1]["status"] == 1
+    assert handlers[1]["config"]["prompt"] == "新口吻"
+    assert handlers[1]["config"]["with_media"] is True
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_disabled_removes_comment_handler():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.handlers import (
+        build_ai_comment_handler,
+        build_ai_transform_handler,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+    transform = build_ai_transform_handler("简化一下")[0]
+    comment = build_ai_comment_handler()[0]
+    repo = AsyncMock()
+    repo.get_by_id.return_value = Subscription(
+        id=1, user_id="u1", feed_id=10, handlers=[comment, transform]
+    )
+    repo.update_options.return_value = Subscription(id=1, user_id="u1", feed_id=10)
+
+    cmd = UpdateSubscriptionCommand(repo)
+    result = await cmd.execute(sub_id=1, user_id="u1", ai_comment={"enabled": False})
+
+    assert result.success is True
+    repo.update_options.assert_awaited_once_with(1, "u1", handlers=[transform])
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_skipped_when_handlers_mode_disabled():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.handlers import (
+        build_ai_comment_handler,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+    comment = build_ai_comment_handler()[0]
+    repo = AsyncMock()
+    repo.get_by_id.return_value = Subscription(
+        id=1, user_id="u1", feed_id=10, handlers=[comment], handlers_mode="disabled"
+    )
+    repo.update_options.return_value = Subscription(id=1, user_id="u1", feed_id=10)
+
+    cmd = UpdateSubscriptionCommand(repo)
+    result = await cmd.execute(sub_id=1, user_id="u1", ai_comment={"enabled": True})
+
+    assert result.success is True
+    repo.update_options.assert_awaited_once_with(1, "u1")
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_missing_subscription_returns_error():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+
+    repo = AsyncMock()
+    repo.get_by_id.return_value = None
+
+    cmd = UpdateSubscriptionCommand(repo)
+    result = await cmd.execute(sub_id=99, user_id="u1", ai_comment={"enabled": True})
+
+    assert result.success is False
+    assert "订阅不存在或无权修改" in result.message
+    repo.update_options.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subscription_ai_comment_without_user_cmd_keeps_chain():
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+        UpdateSubscriptionCommand,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.handlers import (
+        build_ai_comment_handler,
+    )
+    from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+    repo = AsyncMock()
+    repo.get_by_id.return_value = Subscription(
+        id=1, user_id="u1", feed_id=10, handlers=[], handlers_mode="inherit"
+    )
+    repo.update_options.return_value = Subscription(id=1, user_id="u1", feed_id=10)
+
+    # 未注入 get_user_settings_cmd 时无法快照合并，仅写入启用评论处理器。
+    cmd = UpdateSubscriptionCommand(repo)
+    result = await cmd.execute(sub_id=1, user_id="u1", ai_comment={"enabled": True})
+
+    assert result.success is True
+    repo.update_options.assert_awaited_once_with(
+        1, "u1", handlers=build_ai_comment_handler()
+    )

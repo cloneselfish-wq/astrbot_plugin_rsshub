@@ -248,7 +248,7 @@ async def test_handlers_endpoint_returns_registry_schema():
     payload = await response.get_json()
     assert payload["ok"] is True
     names = {item["name"] for item in payload["items"]}
-    assert names == {"ai_filter", "ai_transform"}
+    assert names == {"ai_filter", "ai_transform", "ai_comment"}
     ai_filter = next(item for item in payload["items"] if item["name"] == "ai_filter")
     assert any(field["type"] == "select" for field in ai_filter["schema"])
     ai_transform = next(
@@ -258,6 +258,10 @@ async def test_handlers_endpoint_returns_registry_schema():
         field for field in ai_transform["schema"] if field["key"] == "scope"
     )
     assert scope_field["default"] == "plaintext"
+    ai_comment = next(
+        item for item in payload["items"] if item["name"] == "ai_comment"
+    )
+    assert any(field["type"] == "bool" for field in ai_comment["schema"])
 
 
 @pytest.mark.asyncio

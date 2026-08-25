@@ -24,6 +24,7 @@ def build_subscription_tools(
     async def rss_subscribe(
         context: ContextWrapper[AstrAgentContext],
         targets: list[str] | None = None,
+        with_comment: bool = True,
     ) -> str:
         event = extract_event(context)
         normalized_targets = normalize_subscribe_targets(targets)
@@ -33,6 +34,7 @@ def build_subscription_tools(
             event,
             normalized_targets,
             deps,
+            with_comment=with_comment,
         )
         return result.get("plain", "")
 
@@ -67,7 +69,9 @@ def build_subscription_tools(
             name="rss_subscribe",
             description=(
                 "订阅已确认的 RSS/Atom Feed 或 RSSHub 路由到当前会话。"
-                "targets 是唯一公开参数；修改或退订前先用 rss_list_subscriptions 定位订阅。"
+                "默认启用 bot 评论（推送合并转发成功后单独发一条吐槽/看法）；"
+                "用户明确表示不需要评论时才传 with_comment=false。"
+                "修改或退订前先用 rss_list_subscriptions 定位订阅。"
             ),
             parameters={
                 "type": "object",
@@ -76,6 +80,10 @@ def build_subscription_tools(
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "订阅目标数组；每项可为完整 RSS URL 或 RSSHub 路由路径，例如 /twitter/user/123。",
+                    },
+                    "with_comment": {
+                        "type": "boolean",
+                        "description": "是否开启 bot 评论（订阅推送后单独发一条吐槽/看法）。默认 true；用户明确说不要评论时传 false。",
                     },
                 },
                 "required": ["targets"],

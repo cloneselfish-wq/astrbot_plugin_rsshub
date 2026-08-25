@@ -104,6 +104,8 @@ class ContentHandlerSettings:
     ai_provider_id: str = ""
     ai_persona_id: str = ""
     ai_fallback_providers: tuple[str, ...] = field(default_factory=tuple)
+    ai_comment_image_provider_id: str = ""  # AI 评论读图 Provider（留空回退 AstrBot 配置）
+    ai_comment_pipeline: bool = True  # AI 评论走 AstrBot 消息管道（默认开启）；false 走直连 text_chat
 
 
 @dataclass(frozen=True)

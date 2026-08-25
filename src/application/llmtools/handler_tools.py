@@ -113,7 +113,7 @@ def build_handler_tools(*, deps: LLMToolDeps, plugin_context) -> list[FunctionTo
             name="rss_list_handlers",
             description=(
                 "列出可用内容 handlers 及 schema。长期 AI 过滤、总结、改写应配置 handlers；"
-                "当前可执行内置 handler 是 ai_filter 与 ai_transform。"
+                "当前可执行内置 handler 是 ai_filter、ai_transform 与 ai_comment。"
             ),
             parameters={"type": "object", "properties": {}},
             handler=rss_list_handlers,
@@ -154,7 +154,7 @@ def build_handler_tools(*, deps: LLMToolDeps, plugin_context) -> list[FunctionTo
                     "sub_id": {"type": "string", "description": "订阅 ID"},
                     "handlers_json": {
                         "type": "string",
-                        "description": "handlers JSON 数组，例如 ai_filter 使用 config.prompt/input_scope，ai_transform 使用 config.prompt/scope",
+                        "description": "handlers JSON 数组，例如 ai_filter 使用 config.prompt/input_scope，ai_transform 使用 config.prompt/scope，ai_comment 使用 config.prompt/with_media",
                     },
                     "mode": {
                         "type": "string",

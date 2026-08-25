@@ -4,7 +4,7 @@
 
 ## 工具列表
 
-- `rss_subscribe`: 订阅已确认的 RSS/Atom Feed 或 RSSHub 路由；公开参数仍只有 `targets: string[]`。
+- `rss_subscribe`: 订阅已确认的 RSS/Atom Feed 或 RSSHub 路由；参数为 `targets: string[]`（必填）与 `with_comment: boolean`（可选，默认 `true` 开启 bot 评论，用户明确说不要评论时传 `false`）。
 - `rss_unsubscribe`: 取消当前会话订阅；用户不知道 ID 时先用 `rss_list_subscriptions` 定位。
 - `rss_unsubscribe_all`: 取消当前会话全部订阅；`scope=global` 只用于明确的全局清理。
 - `rss_list_subscriptions`: 列出当前会话订阅，修改或退订前优先调用。

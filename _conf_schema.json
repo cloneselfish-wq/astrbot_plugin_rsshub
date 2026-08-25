@@ -493,6 +493,19 @@
         "items": {
           "type": "string"
         }
+      },
+      "ai_comment_image_provider_id": {
+        "type": "string",
+        "_special": "select_provider",
+        "description": "AI 评论读图 Provider",
+        "hint": "ai_comment 评论需要读取条目图片时使用的图片描述模型。留空回退到 AstrBot 图片描述配置（provider_settings.default_image_caption_provider_id / provider_ltm_settings.image_caption_provider_id），再回退到当前对话 Provider。仅在 ai_comment_pipeline=false 的直连模式生效",
+        "default": ""
+      },
+      "ai_comment_pipeline": {
+        "type": "bool",
+        "description": "AI 评论走 AstrBot 消息管道",
+        "hint": "开启（默认）时，订阅源 bot 评论像与 bot 对话一样生成：把评论作为合成消息注入 AstrBot 消息管道，触发其他插件、加载人格、注入 livingmemory 记忆、开启消息交互，图片作为原生图片组件由管道读取。关闭时回退 v2.5.0 直连 text_chat + 图片描述转文字。仅主推送转发成功后触发，任何被 handler/通知/去重跳过的条目不产生评论也不读图；管道注入失败自动回退直连",
+        "default": true
       }
     }
   }

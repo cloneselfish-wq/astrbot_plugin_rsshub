@@ -155,6 +155,30 @@ BUILTIN_HANDLER_REGISTRY: dict[str, HandlerMetadata] = {
             ),
         ],
     ),
+    "ai_comment": HandlerMetadata(
+        name="ai_comment",
+        title="AI 评论",
+        description="推送合并转发成功发送后，作为独立普通消息输出一段 AI 吐槽/观点/评论；绝不合并进转发记录。",
+        default_enabled=False,
+        config_schema=[
+            HandlerConfigField(
+                key="prompt",
+                type="text",
+                label="评论要求",
+                description="告诉 AI 以什么口吻/角度评论这条推送。",
+                required=True,
+                default="",
+            ),
+            HandlerConfigField(
+                key="with_media",
+                type="bool",
+                label="阅读图片",
+                description="开启后使用图片描述模型读取条目图片，让评论能结合图片内容。",
+                required=False,
+                default=True,
+            ),
+        ],
+    ),
 }
 
 
@@ -250,6 +274,8 @@ def normalize_handler_config(name: str, value: Any) -> dict[str, Any]:
         normalized.setdefault("scope", AiTransformScope.PLAINTEXT.value)
     if str(name or "").strip() == "ai_filter":
         normalized.setdefault("input_scope", AiFilterInputScope.TEXT.value)
+    if str(name or "").strip() == "ai_comment":
+        normalized.setdefault("with_media", True)
     return normalized
 
 
@@ -458,6 +484,37 @@ def build_ai_transform_handler(prompt: str) -> list[dict[str, Any]]:
             "config": {
                 "prompt": normalized_prompt,
                 "scope": AiTransformScope.PLAINTEXT.value,
+            },
+        }
+    ]
+
+
+DEFAULT_AI_COMMENT_PROMPT = (
+    "以 bot 自己的口吻，像群里的朋友一样，对这条推送发表一句简短自然的吐槽或看法。"
+)
+
+
+def build_ai_comment_handler(
+    prompt: str = DEFAULT_AI_COMMENT_PROMPT,
+) -> list[dict[str, Any]]:
+    """Build a default-enabled ai_comment handler.
+
+    Used by the LLM ``rss_subscribe`` tool when the user did not explicitly
+    decline comments: the subscription gets its own snapshot of the user's
+    global handlers plus this enabled ai_comment handler.
+    """
+    normalized_prompt = str(prompt or "").strip()
+    if not normalized_prompt:
+        return []
+    return [
+        {
+            "id": "builtin.ai_comment.default",
+            "type": HandlerType.BUILTIN.value,
+            "name": "ai_comment",
+            "status": HANDLER_STATUS_ENABLED,
+            "config": {
+                "prompt": normalized_prompt,
+                "with_media": True,
             },
         }
     ]

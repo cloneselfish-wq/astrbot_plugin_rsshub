@@ -13,6 +13,7 @@ from astrbot_plugin_rsshub.src.application.services.content_handlers import (
 )
 from astrbot_plugin_rsshub.src.application.services.notification_dispatcher import (
     NotificationDispatcher,
+    PreparedSubscriptionDispatch,
     SendTarget,
     append_media_links_to_text,
     infer_media_type,
@@ -27,6 +28,7 @@ from astrbot_plugin_rsshub.src.domain.entities.content_types import (
     LayoutFragment,
     build_generated_media_url,
 )
+from astrbot_plugin_rsshub.src.domain.entities.handlers import normalize_handler_config
 from astrbot_plugin_rsshub.src.domain.entities.push_history import PushHistory
 from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
 from astrbot_plugin_rsshub.src.domain.entities.user import User
@@ -864,6 +866,202 @@ async def test_ai_transform_xml_reparses_raw_xml_and_updates_entry():
     assert "https://example.com/image.jpg" in result.entry.media_urls
     assert result.entry.raw_xml.startswith("<item>")
     assert result.trace[0]["scope"] == "xml"
+
+
+def _make_persona_sub(handlers):
+    return Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="override",
+        handlers=handlers,
+    )
+
+
+def _transform_handler(scope):
+    return {
+        "id": "builtin.ai_transform.default",
+        "type": "builtin",
+        "name": "ai_transform",
+        "status": 1,
+        "config": {"prompt": "压缩成简短摘要", "scope": scope},
+    }
+
+
+def _comment_handler(prompt="吐槽一下"):
+    return {
+        "id": "builtin.ai_comment.default",
+        "type": "builtin",
+        "name": "ai_comment",
+        "status": 1,
+        "config": {"prompt": prompt, "with_media": False},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_active_skips_persona_in_ai_transform_plaintext():
+    provider = FakeProvider('{"title":"新标题","summary":"新摘要","content":"新正文"}')
+    context = FakeProviderSelectorContext(
+        default_provider=provider,
+        selected_provider=provider,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="provider-1",
+            ai_persona_id="persona-1",
+            ai_comment_pipeline=False,
+        ),
+    )
+    sub = _make_persona_sub([_transform_handler("plaintext"), _comment_handler()])
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=_make_entry(),
+        session_id="session-1",
+    )
+
+    # transform 先执行，正文不套人格；评论随后执行，保留人格口吻
+    assert provider.prompts[0]["system_prompt"] == ""
+    assert provider.prompts[1]["system_prompt"] == "persona system prompt"
+    assert result.trace[0]["persona_applied"] is False
+    assert result.commentary
+    assert result.trace[1]["commentary_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_ai_transform_without_comment_keeps_persona():
+    provider = FakeProvider('{"title":"新标题","summary":"新摘要","content":"新正文"}')
+    context = FakeProviderSelectorContext(
+        default_provider=provider,
+        selected_provider=provider,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="provider-1",
+            ai_persona_id="persona-1",
+        ),
+    )
+    sub = _make_persona_sub([_transform_handler("plaintext")])
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=_make_entry(),
+        session_id="session-1",
+    )
+
+    assert provider.prompts[0]["system_prompt"] == "persona system prompt"
+    assert result.trace[0]["persona_applied"] is True
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_active_skips_persona_in_ai_transform_xml():
+    provider = FakeProvider(
+        '{"raw_xml":"<item><title>新标题</title><link>https://example.com/new</link><description><![CDATA[<p>新的正文</p>]]></description><author>new-author</author></item>"}'
+    )
+    context = FakeProviderSelectorContext(
+        default_provider=provider,
+        selected_provider=provider,
+    )
+    runtime = ContentHandlerRuntime(
+        context,
+        settings=ContentHandlerSettings(
+            ai_provider_id="provider-1",
+            ai_persona_id="persona-1",
+            ai_comment_pipeline=False,
+        ),
+    )
+    sub = _make_persona_sub([_transform_handler("xml"), _comment_handler()])
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=_make_entry(),
+        session_id="session-1",
+    )
+
+    # xml transform 走 tool_loop_agent：system_prompt 不含人格；评论保留人格
+    assert "persona system prompt" not in provider.prompts[0]["system_prompt"]
+    assert provider.prompts[1]["system_prompt"] == "persona system prompt"
+    assert result.trace[0]["persona_applied"] is False
+    assert result.entry.title == "新标题"
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_uses_pre_transform_entry_content():
+    provider = FakeProviderSequence(
+        [
+            '{"title":"改写后标题","summary":"改写后摘要","content":"改写后正文"}',
+            "评论：针对原文的吐槽",
+        ]
+    )
+    runtime = ContentHandlerRuntime(
+        FakeProviderContext(provider),
+        settings=ContentHandlerSettings(ai_comment_pipeline=False),
+    )
+    sub = _make_persona_sub([_transform_handler("plaintext"), _comment_handler()])
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=EntryContentContext(
+            title="原文标题",
+            summary="原文摘要",
+            content="原文正文",
+            link="https://example.com/entry",
+            author="author",
+            feed_title="Feed",
+            feed_link="https://example.com/feed.xml",
+            raw_xml="<item><title>原文标题</title></item>",
+        ),
+        session_id="session-1",
+    )
+
+    # 转发正文被改写，但评论基于改写前的原文生成
+    assert result.entry.title == "改写后标题"
+    assert result.commentary == "评论：针对原文的吐槽"
+    comment_call = provider.prompts[1]
+    assert "原文标题" in comment_call["prompt"]
+    assert "原文正文" in comment_call["prompt"]
+    assert "改写后标题" not in comment_call["prompt"]
+    assert "改写后正文" not in comment_call["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_default_disabled_for_old_subs_without_explicit_status():
+    # 老订阅/未显式开启的 ai_comment：字段缺省视为关闭，不产生评论也不调用 AI
+    provider = FakeProvider("一条吐槽")
+    runtime = ContentHandlerRuntime(
+        FakeProviderContext(provider),
+        settings=ContentHandlerSettings(),
+    )
+    sub = Subscription(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        handlers_mode="override",
+        handlers=[
+            {
+                "id": "builtin.ai_comment.legacy",
+                "type": "builtin",
+                "name": "ai_comment",
+                "config": {"prompt": "吐槽一下", "with_media": False},
+            }
+        ],
+    )
+
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=_make_entry(),
+    )
+
+    assert result.commentary == ""
+    assert result.trace[0]["status"] == "disabled"
+    assert provider.prompts == []
 
 
 @pytest.mark.asyncio
@@ -2970,3 +3168,712 @@ async def test_dispatch_telegraph_failure_falls_back_to_native_send(monkeypatch)
     )
 
     assert stats["success"] == 1
+
+
+# ---- ai_comment（AI 评论）----
+
+
+class CaptionFailingProvider(FakeProvider):
+    """第一次 text_chat（图片描述）抛异常，之后正常返回评论文本。"""
+
+    def __init__(self, completion_text: str) -> None:
+        super().__init__(completion_text)
+        self.calls = 0
+
+    async def text_chat(self, **kwargs):
+        self.prompts.append(kwargs)
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("caption failed")
+        return FakeProviderResponse(self.completion_text)
+
+
+def _comment_subscription(**overrides) -> Subscription:
+    values = dict(
+        id=1,
+        user_id="user-1",
+        feed_id=10,
+        platform_name="telegram",
+        target_session="telegram:Group:1",
+        handlers_mode="override",
+        handlers=[
+            {
+                "id": "builtin.ai_comment.default",
+                "type": "builtin",
+                "name": "ai_comment",
+                "status": 1,
+                "config": {"prompt": "吐槽一下", "with_media": True},
+            }
+        ],
+    )
+    values.update(overrides)
+    return Subscription(**values)
+
+
+def _comment_entry(**overrides) -> EntryContentContext:
+    values = dict(
+        title="title",
+        summary="summary",
+        content="content",
+        link="https://example.com/entry",
+        author="author",
+        feed_title="Feed",
+        feed_link="https://example.com/feed.xml",
+    )
+    values.update(overrides)
+    return EntryContentContext(**values)
+
+
+def _make_dispatcher(
+    *,
+    sender: FakeSender,
+    provider: FakeProvider | None = None,
+    subs: list[Subscription],
+    basic_settings: SimpleNamespace | None = None,
+    pipeline_mode: bool = False,
+    pipeline_router=None,
+):
+    sub_repo = AsyncMock()
+    sub_repo.get_active_by_feed_id.return_value = subs
+    history_repo = AsyncMock()
+    history_repo.exists_success_by_scope_and_guid.return_value = False
+    history_repo.save.side_effect = lambda history: history
+    user_repo = AsyncMock()
+    user_repo.get_or_create.side_effect = lambda user_id: User(id=user_id)
+
+    dispatcher = NotificationDispatcher(
+        subscription_repo=sub_repo,
+        push_history_repo=history_repo,
+        sender_provider=FakeSenderProvider(sender),
+        user_repo=user_repo,
+        content_handler_runtime=ContentHandlerRuntime(
+            FakeProviderContext(provider or FakeProvider("一条吐槽")),
+            settings=ContentHandlerSettings(ai_comment_pipeline=pipeline_mode),
+        ),
+        basic_settings=basic_settings,
+        pipeline_router=pipeline_router,
+    )
+    return dispatcher, history_repo
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_generates_and_sends_after_forward():
+    sender = FakeSender()
+    provider = FakeProvider("这条推送真有意思")
+    sub = _comment_subscription()
+    dispatcher, history_repo = _make_dispatcher(
+        sender=sender, provider=provider, subs=[sub]
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats == {"success": 1, "failed": 0, "pending": 0, "skipped": 0}
+    assert len(sender.requests) == 2
+    forward_request, forward_context = sender.requests[0]
+    comment_request, comment_context = sender.requests[1]
+    # 转发内容是格式化后的条目正文（含标题与 via 来源后缀）
+    assert "content" in forward_request.message
+    assert "via https://example.com/entry" in forward_request.message
+    assert forward_request.message != comment_request.message
+    assert comment_request.message == "这条推送真有意思"
+    assert comment_context.plain_text_only is True
+    assert comment_request.media is None
+    assert comment_request.layout is None
+    # 评论独立发送，与转发目标相同会话
+    assert comment_request.session_id == "telegram:Group:1"
+
+    saved = history_repo.save.await_args_list[1].args[0]
+    assert saved.status == "success"
+    comment_trace = [
+        t for t in (saved.handler_trace or []) if t["name"] == "ai_comment"
+    ]
+    assert comment_trace
+    assert comment_trace[0]["commentary_present"] is True
+    assert comment_trace[0]["commentary_length"] == len("这条推送真有意思")
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_not_sent_when_forward_fails():
+    sender = FakeSender(SendResult(ok=False, detail="forward failed"))
+    provider = FakeProvider("一条吐槽")
+    sub = _comment_subscription()
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender, provider=provider, subs=[sub]
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats["success"] == 0
+    assert stats["pending"] + stats["failed"] == 1
+    # 转发失败不产生评论
+    assert len(sender.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_not_sent_when_filter_blocks():
+    sender = FakeSender()
+    provider = FakeProviderSequence(
+        ['{"allow":false,"reason":"广告"}', "不应发送的评论"]
+    )
+    sub = _comment_subscription(
+        handlers=[
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "跳过广告", "input_scope": "text"},
+            },
+            {
+                "id": "builtin.ai_comment.default",
+                "type": "builtin",
+                "name": "ai_comment",
+                "status": 1,
+                "config": {"prompt": "吐槽一下", "with_media": True},
+            },
+        ]
+    )
+    dispatcher, history_repo = _make_dispatcher(
+        sender=sender, provider=provider, subs=[sub]
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats == {"success": 0, "failed": 0, "pending": 0, "skipped": 1}
+    assert sender.requests == []
+    saved = history_repo.save.await_args.args[0]
+    assert saved.status == "skipped"
+    names = [t["name"] for t in (saved.handler_trace or [])]
+    assert "ai_filter" in names
+    assert "ai_comment" not in names
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_not_sent_when_notify_disabled():
+    sender = FakeSender()
+    provider = FakeProvider("一条吐槽")
+    sub = _comment_subscription(notify=False)
+    dispatcher, history_repo = _make_dispatcher(
+        sender=sender, provider=provider, subs=[sub]
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats == {"success": 0, "failed": 0, "pending": 0, "skipped": 1}
+    assert sender.requests == []
+    saved = history_repo.save.await_args.args[0]
+    assert saved.status == "skipped"
+    assert saved.fail_reason == "notify disabled"
+
+
+def test_ai_comment_excluded_from_payload_signature():
+    base_kwargs = dict(
+        subscription=SimpleNamespace(
+            target_session="telegram:Group:1", platform_name="telegram"
+        ),
+        processed_entry=None,
+        handler_trace=None,
+        effective_title="title",
+        effective_link="https://example.com/entry",
+        effective_content="content",
+        effective_send_mode=0,
+        effective_style=0,
+        effective_media_urls=None,
+        effective_media_items=None,
+        effective_layout=None,
+        persisted_media_urls=None,
+    )
+    prepared_a = PreparedSubscriptionDispatch(**base_kwargs, commentary="评论A")
+    prepared_b = PreparedSubscriptionDispatch(**base_kwargs, commentary="评论B")
+    assert (
+        NotificationDispatcher._payload_signature(prepared_a)
+        == NotificationDispatcher._payload_signature(prepared_b)
+    )
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_multi_bot_dedup_only_winner_sends_comment():
+    sender = FakeSender()
+    provider = FakeProvider("一条吐槽")
+    sub_a = _comment_subscription(id=1)
+    sub_b = _comment_subscription(id=2)
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub_a, sub_b],
+        basic_settings=SimpleNamespace(
+            deduplicate_multi_bot=True,
+            failed_queue_capacity=50,
+            failed_queue_max_retries=3,
+        ),
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats["success"] == 1
+    assert stats["skipped"] == 1
+    # 只有主订阅（id=1）发送转发 + 评论；被抑制订阅不发送
+    assert len(sender.requests) == 2
+    for _request, _context in sender.requests:
+        assert _request.session_id == "telegram:Group:1"
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_provider_unavailable_fails_open_with_trace():
+    sender = FakeSender()
+    sub = _comment_subscription()
+    sub_repo = AsyncMock()
+    sub_repo.get_active_by_feed_id.return_value = [sub]
+    history_repo = AsyncMock()
+    history_repo.exists_success_by_scope_and_guid.return_value = False
+    history_repo.save.side_effect = lambda history: history
+    user_repo = AsyncMock()
+    user_repo.get_or_create.return_value = User(id="user-1")
+
+    dispatcher = NotificationDispatcher(
+        subscription_repo=sub_repo,
+        push_history_repo=history_repo,
+        sender_provider=FakeSenderProvider(sender),
+        user_repo=user_repo,
+        # context 为普通对象：provider 链解析失败，评论 fail-open
+        content_handler_runtime=ContentHandlerRuntime(
+            object(),
+            settings=ContentHandlerSettings(ai_comment_pipeline=False),
+        ),
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    # 主推送不受影响，评论 fail-open
+    assert stats["success"] == 1
+    assert len(sender.requests) == 1
+    saved = history_repo.save.await_args_list[1].args[0]
+    comment_trace = [
+        t for t in (saved.handler_trace or []) if t["name"] == "ai_comment"
+    ]
+    assert comment_trace
+    assert comment_trace[0]["fallback"] is True
+    assert comment_trace[0]["fallback_reason"] == "provider unavailable"
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_with_media_reads_image_captions():
+    sender = FakeSender()
+    provider = FakeProviderSequence(["图里是一只猫", "这猫真可爱"])
+    sub = _comment_subscription()
+    dispatcher, history_repo = _make_dispatcher(
+        sender=sender, provider=provider, subs=[sub]
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(
+            media_items=(("image", "https://example.com/cat.jpg"),)
+        ),
+    )
+
+    assert stats["success"] == 1
+    # 第一次 text_chat 是图片描述（带 image_urls），第二次是评论生成
+    caption_call = provider.prompts[0]
+    assert caption_call.get("image_urls") == ["https://example.com/cat.jpg"]
+    assert "请用一句话描述" in caption_call.get("prompt", "")
+    comment_call = provider.prompts[1]
+    assert "图里是一只猫" in comment_call.get("prompt", "")
+    assert len(sender.requests) == 2
+    assert sender.requests[1][0].message == "这猫真可爱"
+
+    saved = history_repo.save.await_args_list[1].args[0]
+    comment_trace = [
+        t for t in (saved.handler_trace or []) if t["name"] == "ai_comment"
+    ]
+    assert comment_trace[0]["images_read"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_ai_comment_caption_failure_does_not_block_comment():
+    sender = FakeSender()
+    provider = CaptionFailingProvider("评论正文")
+    sub = _comment_subscription()
+    dispatcher, history_repo = _make_dispatcher(
+        sender=sender, provider=provider, subs=[sub]
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(
+            media_items=(("image", "https://example.com/cat.jpg"),)
+        ),
+    )
+
+    assert stats["success"] == 1
+    # 图片描述失败只跳过，评论仍按纯文本生成并发送
+    assert len(sender.requests) == 2
+    assert sender.requests[1][0].message == "评论正文"
+    saved = history_repo.save.await_args_list[1].args[0]
+    comment_trace = [
+        t for t in (saved.handler_trace or []) if t["name"] == "ai_comment"
+    ]
+    assert comment_trace[0]["images_read"] == 0
+    assert comment_trace[0]["commentary_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_comment_injected_after_forward():
+    """管道模式（默认）：转发成功后把 trigger 注入 AstrBot 消息管道，不直连调 LLM、不自行发评论。"""
+    sender = FakeSender()
+    provider = FakeProvider("管道模式不该直连")
+    sub = _comment_subscription(target_session="aiocqhttp:GroupMessage:123456")
+    router = AsyncMock()
+    router.inject.return_value = {"ok": True, "fallback": False, "error": ""}
+    dispatcher, history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub],
+        pipeline_mode=True,
+        pipeline_router=router,
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats == {"success": 1, "failed": 0, "pending": 0, "skipped": 0}
+    # 只有转发一条消息；评论由管道异步生成后投递
+    assert len(sender.requests) == 1
+    router.inject.assert_awaited_once()
+    # 管道模式不直连 text_chat
+    assert provider.prompts == []
+
+    saved = history_repo.save.await_args_list[1].args[0]
+    assert saved.status == "success"
+    comment_trace = [
+        t for t in (saved.handler_trace or []) if t["name"] == "ai_comment"
+    ]
+    assert comment_trace
+    assert comment_trace[0]["mode"] == "pipeline"
+    assert "commentary_present" not in comment_trace[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_comment_inject_failure_falls_back_to_direct():
+    """注入失败（目标会话不可解析等）自动回退直连，评论不静默丢失。"""
+    sender = FakeSender()
+    provider = FakeProvider("回退直连的评论")
+    sub = _comment_subscription(target_session="aiocqhttp:GroupMessage:123456")
+    router = AsyncMock()
+    router.inject.return_value = {
+        "ok": False,
+        "fallback": True,
+        "error": "unparseable session",
+    }
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub],
+        pipeline_mode=True,
+        pipeline_router=router,
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats["success"] == 1
+    assert len(sender.requests) == 2
+    # 第二条是回退直连生成的评论
+    comment_request, comment_context = sender.requests[1]
+    assert comment_request.message == "回退直连的评论"
+    assert comment_context.plain_text_only is True
+    assert comment_request.session_id == "aiocqhttp:GroupMessage:123456"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_comment_inject_raises_falls_back_to_direct():
+    """注入抛异常（平台未连接等）同样回退直连。"""
+    sender = FakeSender()
+    provider = FakeProvider("异常回退的评论")
+    sub = _comment_subscription(target_session="aiocqhttp:GroupMessage:123456")
+    router = AsyncMock()
+    router.inject.side_effect = RuntimeError("platform not connected")
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub],
+        pipeline_mode=True,
+        pipeline_router=router,
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats["success"] == 1
+    assert len(sender.requests) == 2
+    assert sender.requests[1][0].message == "异常回退的评论"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_comment_not_injected_when_forward_fails():
+    """需求 2：转发失败不注入、不读图、不评论。"""
+    sender = FakeSender(SendResult(ok=False, detail="forward failed"))
+    provider = FakeProvider("不应发送的评论")
+    sub = _comment_subscription(target_session="aiocqhttp:GroupMessage:123456")
+    router = AsyncMock()
+    router.inject.return_value = {"ok": True, "fallback": False, "error": ""}
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub],
+        pipeline_mode=True,
+        pipeline_router=router,
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats["success"] == 0
+    assert stats["pending"] + stats["failed"] == 1
+    router.inject.assert_not_awaited()
+    assert len(sender.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_comment_not_injected_when_filter_blocks():
+    """需求 2：ai_filter 拦截的条目不注入评论、不读图。"""
+    sender = FakeSender()
+    provider = FakeProvider('{"allow":false,"reason":"广告"}')
+    sub = _comment_subscription(
+        target_session="aiocqhttp:GroupMessage:123456",
+        handlers=[
+            {
+                "id": "builtin.ai_filter.default",
+                "type": "builtin",
+                "name": "ai_filter",
+                "status": 1,
+                "config": {"prompt": "跳过广告", "input_scope": "text"},
+            },
+            {
+                "id": "builtin.ai_comment.default",
+                "type": "builtin",
+                "name": "ai_comment",
+                "status": 1,
+                "config": {"prompt": "吐槽一下", "with_media": True},
+            },
+        ],
+    )
+    router = AsyncMock()
+    router.inject.return_value = {"ok": True, "fallback": False, "error": ""}
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub],
+        pipeline_mode=True,
+        pipeline_router=router,
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats == {"success": 0, "failed": 0, "pending": 0, "skipped": 1}
+    router.inject.assert_not_awaited()
+    assert sender.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_comment_not_injected_when_notify_disabled():
+    """需求 2：通知关闭的条目不注入评论、不读图。"""
+    sender = FakeSender()
+    provider = FakeProvider("不应发送的评论")
+    sub = _comment_subscription(
+        target_session="aiocqhttp:GroupMessage:123456", notify=False
+    )
+    router = AsyncMock()
+    router.inject.return_value = {"ok": True, "fallback": False, "error": ""}
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=provider,
+        subs=[sub],
+        pipeline_mode=True,
+        pipeline_router=router,
+    )
+
+    stats = await dispatcher.dispatch_to_feed_subscribers(
+        feed_id=10,
+        content="content",
+        entry_title="title",
+        entry_link="https://example.com/entry",
+        entry_guid="guid-1",
+        raw_entry=_comment_entry(),
+    )
+
+    assert stats == {"success": 0, "failed": 0, "pending": 0, "skipped": 1}
+    router.inject.assert_not_awaited()
+    assert sender.requests == []
+
+
+def test_ai_comment_trigger_excluded_from_payload_signature():
+    """多 bot 去重签名不含 comment_trigger：被抑制订阅不因 trigger 不同而重复发送。"""
+    base_kwargs = dict(
+        subscription=SimpleNamespace(
+            target_session="telegram:Group:1", platform_name="telegram"
+        ),
+        processed_entry=None,
+        handler_trace=None,
+        effective_title="title",
+        effective_link="https://example.com/entry",
+        effective_content="content",
+        effective_send_mode=0,
+        effective_style=0,
+        effective_media_urls=None,
+        effective_media_items=None,
+        effective_layout=None,
+        persisted_media_urls=None,
+    )
+    prepared_a = PreparedSubscriptionDispatch(
+        **base_kwargs,
+        comment_trigger=SimpleNamespace(entry=_comment_entry(), config={}),
+    )
+    prepared_b = PreparedSubscriptionDispatch(
+        **base_kwargs,
+        comment_trigger=SimpleNamespace(
+            entry=_comment_entry(content="other"), config={}
+        ),
+    )
+    assert (
+        NotificationDispatcher._payload_signature(prepared_a)
+        == NotificationDispatcher._payload_signature(prepared_b)
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_to_session_threads_plain_text_only():
+    sender = FakeSender()
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=FakeProvider("x"),
+        subs=[_comment_subscription()],
+    )
+
+    result = await dispatcher.send_to_session(
+        target=SendTarget(
+            user_id="user-1",
+            platform_name="telegram",
+            target_session="telegram:Group:1",
+        ),
+        content="hello",
+        media_urls=None,
+        plain_text_only=True,
+    )
+
+    assert result["ok"] is True
+    _request, context = sender.requests[0]
+    assert context.plain_text_only is True
+
+
+@pytest.mark.asyncio
+async def test_send_to_session_defaults_plain_text_only_false():
+    sender = FakeSender()
+    dispatcher, _history_repo = _make_dispatcher(
+        sender=sender,
+        provider=FakeProvider("x"),
+        subs=[_comment_subscription()],
+    )
+
+    await dispatcher.send_to_session(
+        target=SendTarget(
+            user_id="user-1",
+            platform_name="telegram",
+            target_session="telegram:Group:1",
+        ),
+        content="hello",
+        media_urls=None,
+    )
+
+    _request, context = sender.requests[0]
+    assert context.plain_text_only is False
+
+
+def test_normalize_handler_config_ai_comment_defaults_with_media():
+    assert normalize_handler_config(
+        "ai_comment", {"prompt": "吐槽一下"}
+    ) == {"prompt": "吐槽一下", "with_media": True}
+    assert normalize_handler_config(
+        "ai_comment", {"prompt": "吐槽一下", "with_media": None}
+    ) == {"prompt": "吐槽一下", "with_media": True}

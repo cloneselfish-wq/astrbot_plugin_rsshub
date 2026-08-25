@@ -4,7 +4,8 @@ import {
 import {
   prettyJson,
   normalizeHandlers,
-  normalizeHandlerRegistryItem
+  normalizeHandlerRegistryItem,
+  extractCommentState
 } from '../helpers.js';
 
 export const handlersModule = {
@@ -69,6 +70,10 @@ export const handlersModule = {
       if (!Array.isArray(raw)) throw new Error('必须是 JSON 数组');
       const normalized = normalizeHandlers(raw);
       form.handlers_json = JSON.stringify(normalized, null, 2);
+      // 让「Bot 评论」开关与已应用的 JSON 保持一致（订阅编辑表单）。
+      const commentState = extractCommentState(normalized);
+      form.comment_enabled = commentState.comment_enabled;
+      form.comment_prompt = commentState.comment_prompt;
       const dropped = raw.length - normalized.length;
       if (dropped > 0) {
         this.showToast(

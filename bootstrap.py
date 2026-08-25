@@ -465,6 +465,8 @@ async def _build_dependencies(
         state_dir=get_plugin_cache_dir("route_knowledge"),
     )
 
+    get_user_settings_cmd = GetUserSettingsCommand(user_repo=user_repo)
+
     deps = PluginDeps(
         subscribe_cmd=SubscribeFeedCommand(
             subscription_repo=sub_repo,
@@ -478,7 +480,10 @@ async def _build_dependencies(
             feed_repo=feed_repo,
         ),
         sub_state_cmd=SubStateCommand(subscription_repo=sub_repo),
-        update_sub_cmd=UpdateSubscriptionCommand(subscription_repo=sub_repo),
+        update_sub_cmd=UpdateSubscriptionCommand(
+            subscription_repo=sub_repo,
+            get_user_settings_cmd=get_user_settings_cmd,
+        ),
         list_query=GetFeedListQuery(subscription_repo=sub_repo, feed_repo=feed_repo),
         batch_activate_cmd=BatchActivateCommand(subscription_repo=sub_repo),
         batch_deactivate_cmd=BatchDeactivateCommand(subscription_repo=sub_repo),
@@ -492,7 +497,7 @@ async def _build_dependencies(
             feed_repo=feed_repo,
             user_repo=user_repo,
         ),
-        get_user_settings_cmd=GetUserSettingsCommand(user_repo=user_repo),
+        get_user_settings_cmd=get_user_settings_cmd,
         set_user_settings_cmd=SetUserSettingsCommand(user_repo=user_repo),
         test_sub_cmd=TestSubscriptionCommand(
             subscription_repo=sub_repo,

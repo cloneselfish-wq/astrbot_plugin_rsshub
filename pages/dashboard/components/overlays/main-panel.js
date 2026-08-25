@@ -41,6 +41,17 @@ export const mainPanelTemplate = String.raw`
                 <option value="disabled">禁用全部处理链</option>
               </select>
             </div>
+            <div v-if="editForm.handlers_mode !== 'disabled'" class="handler-editor">
+              <div class="setting-row">
+                <span class="setting-label">Bot 评论</span>
+                <label class="toggle-switch"><input type="checkbox" v-model="editForm.comment_enabled" /><span class="toggle-slider"></span><span class="toggle-label">{{ editForm.comment_enabled ? '开启' : '关闭' }}</span></label>
+              </div>
+              <div v-if="editForm.comment_enabled" class="form-group" style="margin-top:8px;">
+                <label>评论口吻</label>
+                <div class="input-wrapper"><input type="text" v-model="editForm.comment_prompt" placeholder="留空使用默认口吻，例如：吐槽一下" /></div>
+              </div>
+              <div class="handler-hint">开启后推送合并转发成功时，会单独发一条 bot 评论（基于改写前的原文）。此开关与下方处理链 JSON 相互独立，保存时自动追加/移除 ai_comment 处理器；inherit 模式下若订阅无自带处理链，会保留用户全局改写需求。</div>
+            </div>
             <div v-if="editForm.handlers_mode !== 'disabled'" class="handler-json">
               <textarea v-model="editForm.handlers_json" rows="10"></textarea>
               <button type="button" class="btn btn-secondary btn-small" @click="applyHandlersJson(editForm)">应用 JSON</button>

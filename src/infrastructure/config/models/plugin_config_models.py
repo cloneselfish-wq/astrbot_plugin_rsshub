@@ -264,6 +264,14 @@ class ContentHandlersConfig(BaseModel):
     ai_fallback_providers: list[str] = Field(
         default_factory=list, description="AI 回退 Provider ID 列表"
     )
+    ai_comment_image_provider_id: str = Field(
+        default="",
+        description="AI 评论读图 Provider ID（留空回退 AstrBot 图片描述配置）",
+    )
+    ai_comment_pipeline: bool = Field(
+        default=True,
+        description="AI 评论走 AstrBot 消息管道（默认开启；false 回退直连 text_chat）",
+    )
 
     @field_validator("ai_fallback_providers", mode="before")
     @classmethod

@@ -102,6 +102,22 @@ export function buildHandlersFromEditorState(form) {
   return normalizeHandlers(JSON.parse(form.handlers_json || '[]'));
 }
 
+// 订阅编辑弹窗的「Bot 评论」开关状态，从 handlers 链派生。
+// 与后端 is_handler_enabled 语义一致：status=1 视为开启，其余视为关闭。
+export const COMMENT_HANDLER_NAME = 'ai_comment';
+
+export function extractCommentState(handlers) {
+  const normalized = normalizeHandlers(handlers || []);
+  const comment = normalized.find(
+    (h) => String(h.name || '').trim() === COMMENT_HANDLER_NAME
+  );
+  const enabled = Boolean(comment && Number(comment.status) === 1);
+  return {
+    comment_enabled: enabled,
+    comment_prompt: enabled ? String(comment.config?.prompt || '') : '',
+  };
+}
+
 export function createTagFilter() {
   return {
     values: [],
@@ -171,6 +187,8 @@ export function createEmptyEditForm() {
     display_media: -100,
     handlers_mode: 'inherit',
     handlers_json: '[]',
+    comment_enabled: false,
+    comment_prompt: '',
     _originalHandlers: [],
   };
 }
@@ -200,6 +218,7 @@ export function createEditFormFromSub(sub) {
     display_media: sub.display_media ?? -100,
     handlers_mode: sub.handlers_mode || 'inherit',
     ...handlersToEditorState(sub.handlers),
+    ...extractCommentState(sub.handlers),
     _originalHandlers: normalizeHandlers(sub.handlers),
   };
 }

@@ -6,6 +6,7 @@ import asyncio
 import json
 from dataclasses import dataclass, replace
 from typing import Any
+from uuid import uuid4
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
@@ -73,7 +74,7 @@ from ...domain.entities.subscription import (
 )
 from ...domain.entities.user import User
 from ...infrastructure.config import ContentHandlerSettings
-from ...infrastructure.utils import get_logger
+from ...infrastructure.utils import detect_media_hint, get_logger
 from ...shared.constants import (
     AiFilterInputScope,
     AiTransformScope,
@@ -81,6 +82,7 @@ from ...shared.constants import (
     HandlerType,
 )
 from .html_parser import HTMLParser
+from .pipeline_comment import AiCommentTrigger
 
 logger = get_logger()
 
@@ -244,6 +246,8 @@ class HandlerProcessResult:
     allow: bool = True
     reason: str = ""
     trace: tuple[dict[str, Any], ...] = ()
+    commentary: str = ""  # ai_comment 直连模式生成的评论正文；空表示无评论
+    comment_trigger: AiCommentTrigger | None = None  # ai_comment 管道模式触发载荷
 
 
 class ContentHandlerRuntime:
@@ -315,7 +319,16 @@ class ContentHandlerRuntime:
     ) -> HandlerProcessResult:
         result = entry
         trace: list[dict[str, Any]] = []
-        for spec in self.resolve_handlers(subscription=subscription, user=user):
+        commentary = ""
+        comment_trigger: AiCommentTrigger | None = None
+        resolved = self.resolve_handlers(subscription=subscription, user=user)
+        # ai_comment 开启时：推送给订阅群的正文不套用全局人格转述，
+        # 人格只保留在独立评论（bot 用自己的口吻说话）与 ai_filter。
+        comment_active = any(
+            is_handler_enabled(spec) and spec.name == "ai_comment"
+            for spec in resolved
+        )
+        for spec in resolved:
             if not is_handler_enabled(spec):
                 trace.append(
                     {
@@ -375,6 +388,7 @@ class ContentHandlerRuntime:
                         user_id=user_id
                         or getattr(user, "id", "")
                         or subscription.user_id,
+                        skip_persona=comment_active,
                     )
                     result = transform_result["entry"]
                     trace.append(
@@ -383,6 +397,47 @@ class ContentHandlerRuntime:
                             "name": spec.name,
                             "status": HandlerTraceStatus.OK.value,
                             **transform_result["trace"],
+                        }
+                    )
+                elif spec.name == "ai_comment":
+                    # 评论针对改写前的原始条目生成（原文是怎样的就评论怎样的），
+                    # 而不是改写后的消息；评论内容不受 ai_transform 影响。
+                    if self._settings.ai_comment_pipeline:
+                        # 管道模式（默认）：不调 LLM、不读图，只构造触发载荷；
+                        # 评论正文由 AstrBot 消息管道在转发成功后生成并回复
+                        # （见 notification_dispatcher._dispatch_pipeline_comment）。
+                        comment_text = ""
+                        comment_prompt = str(
+                            (spec.config or {}).get("prompt") or ""
+                        )
+                        comment_trigger = AiCommentTrigger(
+                            entry=entry,
+                            prompt=comment_prompt,
+                            with_media=self._normalize_with_media(
+                                (spec.config or {}).get("with_media")
+                            ),
+                            config=dict(spec.config or {}),
+                        )
+                        comment_trace: dict[str, Any] = {
+                            "mode": "pipeline",
+                            "with_media": comment_trigger.with_media,
+                            "prompt_present": bool(comment_prompt.strip()),
+                        }
+                    else:
+                        # 直连模式（ai_comment_pipeline=false）：v2.5.0 行为，
+                        # 插件直连 text_chat 生成正文 + 图片描述。
+                        comment_text, comment_trace = await self._run_ai_comment(
+                            entry,
+                            spec.config,
+                            session_id=session_id,
+                        )
+                    commentary = str(comment_text or "").strip()
+                    trace.append(
+                        {
+                            "id": spec.id,
+                            "name": spec.name,
+                            "status": HandlerTraceStatus.OK.value,
+                            **comment_trace,
                         }
                     )
                 else:
@@ -409,7 +464,12 @@ class ContentHandlerRuntime:
                         "reason": str(exc),
                     }
                 )
-        return HandlerProcessResult(entry=result, trace=tuple(trace))
+        return HandlerProcessResult(
+            entry=result,
+            trace=tuple(trace),
+            commentary=commentary,
+            comment_trigger=comment_trigger,
+        )
 
     async def _run_ai_transform(
         self,
@@ -421,6 +481,7 @@ class ContentHandlerRuntime:
         target_session: str | None = None,
         platform_name: str | None = None,
         user_id: str | None = None,
+        skip_persona: bool = False,
     ) -> dict[str, Any]:
         prompt = str((config or {}).get("prompt") or "").strip()
         if not prompt or self._context is None:
@@ -472,12 +533,14 @@ class ContentHandlerRuntime:
                 prompt=prompt,
                 provider_id=provider_id,
                 event=agent_event,
+                skip_persona=skip_persona,
             )
         return await self._run_ai_transform_plaintext(
             entry=entry,
             prompt=prompt,
             providers=providers,
             session_id=session_id,
+            skip_persona=skip_persona,
         )
 
     async def _run_ai_transform_plaintext(
@@ -487,6 +550,7 @@ class ContentHandlerRuntime:
         prompt: str,
         providers: list[Provider],
         session_id: str | None = None,
+        skip_persona: bool = False,
     ) -> dict[str, Any]:
         source_payload = {
             "title": entry.title,
@@ -506,11 +570,12 @@ class ContentHandlerRuntime:
             f"\n用户要求:\n{prompt}"
             f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
         )
+        system_prompt = "" if skip_persona else self._resolve_system_prompt()
         payload, model_id = await self._chat_with_backoff(
             providers=providers,
             prompt=request_prompt,
             session_id=session_id,
-            system_prompt=self._resolve_system_prompt(),
+            system_prompt=system_prompt,
             label="ai_transform",
         )
         parsed = self._parse_transform_json(
@@ -523,6 +588,7 @@ class ContentHandlerRuntime:
             "scope": AiTransformScope.PLAINTEXT.value,
             "steps_used": 1,
             "fallback": False,
+            "persona_applied": bool(system_prompt),
         }
         if model_id:
             transform_trace["model_id"] = model_id
@@ -543,6 +609,7 @@ class ContentHandlerRuntime:
         prompt: str,
         provider_id: str,
         event: AstrMessageEvent | Any,
+        skip_persona: bool = False,
     ) -> dict[str, Any]:
         source_payload = {
             "raw_xml": entry.raw_xml,
@@ -552,10 +619,11 @@ class ContentHandlerRuntime:
             "feed_title": entry.feed_title,
             "feed_link": entry.feed_link,
         }
+        persona_prompt = "" if skip_persona else self._resolve_system_prompt()
         system_prompt = "\n\n".join(
             part
             for part in [
-                self._resolve_system_prompt(),
+                persona_prompt,
                 (
                     "你是 RSS XML 改写 agent。你必须遵守 RSS/Atom item 或 entry 片段规范。"
                     "只返回 JSON 对象，且必须包含 raw_xml 字段。"
@@ -599,6 +667,7 @@ class ContentHandlerRuntime:
             "scope": AiTransformScope.XML.value,
             "steps_used": steps_used,
             "fallback": False,
+            "persona_applied": bool(persona_prompt),
         }
         if provider_id:
             transform_trace["model_id"] = provider_id
@@ -676,6 +745,273 @@ class ContentHandlerRuntime:
         if reason_max_length > 0 and len(reason) > reason_max_length:
             reason = reason[:reason_max_length].rstrip()
         return bool(parsed["allow"]), reason, provider_id
+
+    async def _run_ai_comment(
+        self,
+        entry: EntryContentContext,
+        config: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """生成一条 AI 评论（吐槽/观点/看法），失败时 fail-open 返回空串。
+
+        评论基于**改写前的原始条目**（调用方传入的 entry 应为 handler 链输入，
+        而非 ai_transform 之后的 result）。图片描述单独走图片描述 provider
+        （无退避，单图失败跳过），评论正文走 ``_chat_with_backoff``
+        （指数退避 + 回退 provider 链）。返回 ``(评论正文, trace_dict)``。
+        """
+        prompt = str((config or {}).get("prompt") or "").strip()
+        if not prompt or self._context is None:
+            return "", {
+                "fallback": True,
+                "fallback_reason": "missing prompt or context",
+            }
+
+        providers = self._resolve_provider_chain(session_id=session_id)
+        if not providers:
+            logger.warning("ai_comment 跳过：当前没有可用的对话模型 provider")
+            return "", {
+                "fallback": True,
+                "fallback_reason": "provider unavailable",
+            }
+
+        source_payload: dict[str, Any] = {
+            "title": entry.title,
+            "summary": entry.summary,
+            "content": entry.content,
+            "link": entry.link,
+            "author": entry.author,
+            "feed_title": entry.feed_title,
+            "feed_link": entry.feed_link,
+            "media_urls": list(entry.media_urls),
+        }
+
+        images_read = 0
+        with_media = self._normalize_with_media((config or {}).get("with_media"))
+        if with_media:
+            image_captions = await self._describe_comment_images(entry)
+            images_read = len(image_captions)
+            if image_captions:
+                source_payload["image_captions"] = image_captions
+
+        request_prompt = (
+            "你是 RSS 推送评论 agent。请像人一样和订阅群里的人们一起看这条推送，"
+            "写一段吐槽/观点/看法的评论。"
+            "只输出评论正文本身，不要解释、不要 Markdown、不要 JSON 包裹、不要引用字段名。"
+            f"\n用户要求:\n{prompt}"
+            f"\n\n条目数据:\n{json.dumps(source_payload, ensure_ascii=False)}"
+        )
+        commentary, model_id = await self._chat_with_backoff(
+            providers=providers,
+            prompt=request_prompt,
+            session_id=session_id,
+            system_prompt=self._resolve_system_prompt(),
+            label="ai_comment",
+        )
+        commentary = str(commentary or "").strip()
+        # 主 provider 限流/失败后评论会由回退 provider 生成（v2.6.0 首次推送
+        # 日志中 Anthropic 连续限流 5 次后切到 deepseek-v4-flash 即此情况），
+        # 口吻表现与视觉能力可能劣化——显式记录该事实，便于察觉质量劣化。
+        primary_id = self._provider_identity(providers[0])
+        provider_fallback = bool(model_id and primary_id and model_id != primary_id)
+        if provider_fallback:
+            logger.warning(
+                "ai_comment 评论由回退 provider 生成（%s，主 provider %s 限流/失败），"
+                "口吻与图片描述质量可能劣化",
+                model_id,
+                primary_id,
+            )
+        comment_trace: dict[str, Any] = {
+            "with_media": bool(with_media),
+            "images_read": images_read,
+            "commentary_present": bool(commentary),
+            "commentary_length": len(commentary),
+            "fallback": False,
+            "provider_fallback": provider_fallback,
+        }
+        if model_id:
+            comment_trace["model_id"] = model_id
+        return commentary, comment_trace
+
+    async def generate_comment_text(
+        self,
+        entry: EntryContentContext,
+        config: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """直连模式生成评论正文（公开 API）。
+
+        等价于 ``_run_ai_comment``：基于改写前的原始条目、可读图、指数退避 +
+        回退 provider 链，失败 fail-open 返回 ``("", trace)``。供 dispatcher
+        在管道注入失败时做直连回退（与 ``ai_comment_pipeline`` 开关无关）。
+        """
+        return await self._run_ai_comment(
+            entry,
+            config,
+            session_id=session_id,
+        )
+
+    async def _describe_comment_images(self, entry: EntryContentContext) -> list[str]:
+        """对条目图片逐张调用图片描述 provider，返回 ``["<url>: <desc>"]`` 列表。
+
+        单图失败只 warning 跳过，不阻断评论生成（评论是增强层）。
+        """
+        image_urls = self._collect_comment_image_urls(entry)
+        if not image_urls:
+            return []
+        caption_provider = self._resolve_image_caption_provider()
+        if caption_provider is None:
+            logger.warning("ai_comment 未解析到图片描述 provider，评论将只看文字")
+            return []
+        caption_prompt = self._resolve_image_caption_prompt()
+        captions: list[str] = []
+        for image_url in image_urls:
+            try:
+                desc = await self._call_image_caption_once(
+                    provider=caption_provider,
+                    prompt=caption_prompt,
+                    image_url=image_url,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ai_comment 图片描述失败，跳过该图: %s (%s)",
+                    image_url,
+                    exc,
+                )
+                continue
+            if desc:
+                captions.append(f"{image_url}: {desc}")
+        return captions
+
+    def _collect_comment_image_urls(
+        self,
+        entry: EntryContentContext,
+        *,
+        cap: int = 3,
+    ) -> list[str]:
+        """收集条目中的图片 URL（media_items 显式 image + media_urls 推断 image）。"""
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        def append(url: str) -> None:
+            url = str(url or "").strip()
+            if url and url not in seen:
+                seen.add(url)
+                collected.append(url)
+
+        for media_type, media_url in entry.media_items:
+            if str(media_type or "").strip().lower() == "image":
+                append(media_url)
+        for media_url in entry.media_urls:
+            try:
+                detection = detect_media_hint(url=str(media_url or ""))
+            except Exception:
+                detection = None
+            if detection is not None and detection.media_type == "image":
+                append(media_url)
+        return collected[:cap]
+
+    def _resolve_image_caption_provider(
+        self,
+        *,
+        session_id: str | None = None,
+    ) -> Provider | None:
+        """按优先级解析图片描述 provider：
+
+        插件 ``ai_comment_image_provider_id`` → AstrBot ``default_image_caption_provider_id``
+        → ``provider_ltm_settings.image_caption_provider_id`` → 当前对话 provider。
+        """
+        candidate_ids: list[str] = []
+        configured_id = str(
+            self._settings.ai_comment_image_provider_id or ""
+        ).strip()
+        if configured_id:
+            candidate_ids.append(configured_id)
+        candidate_ids.extend(self._read_astrbot_image_caption_provider_id())
+        for provider_id in candidate_ids:
+            provider = self._resolve_provider_by_id(provider_id)
+            if provider is not None:
+                return provider
+        return self._resolve_provider(session_id=session_id)
+
+    def _read_astrbot_image_caption_provider_id(self) -> list[str]:
+        """读取 AstrBot 配置里的图片描述 provider id（两级候选，按序回退）。"""
+        config = self._read_astrbot_config()
+        if not config:
+            return []
+        provider_settings = config.get("provider_settings") or {}
+        provider_ltm_settings = config.get("provider_ltm_settings") or {}
+        default_id = str(
+            (provider_settings.get("default_image_caption_provider_id") or "").strip()
+        )
+        ltm_id = str(
+            (provider_ltm_settings.get("image_caption_provider_id") or "").strip()
+        )
+        return [item for item in (default_id, ltm_id) if item]
+
+    def _read_astrbot_config(self) -> dict[str, Any]:
+        """防御性读取 AstrBot 全局配置；取不到返回空 dict。"""
+        if self._context is None:
+            return {}
+        getter = getattr(self._context, "get_config", None)
+        if getter is not None:
+            try:
+                config = getter()
+                if isinstance(config, dict):
+                    return config
+                data = getattr(config, "data", None)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        config_mgr = getattr(self._context, "astrbot_config_mgr", None)
+        if config_mgr is not None:
+            try:
+                confs = getattr(config_mgr, "confs", None) or {}
+                default_conf = confs.get("default")
+                if isinstance(default_conf, dict):
+                    return default_conf
+            except Exception:
+                pass
+        return {}
+
+    def _resolve_image_caption_prompt(self) -> str:
+        """读取 AstrBot 图片描述提示词，空则使用默认中文提示词。"""
+        config = self._read_astrbot_config()
+        provider_settings = config.get("provider_settings") or {}
+        prompt = str(
+            (provider_settings.get("image_caption_prompt") or "").strip()
+        )
+        return prompt or "请用一句话描述这张图片的内容。"
+
+    async def _call_image_caption_once(
+        self,
+        *,
+        provider: Provider,
+        prompt: str,
+        image_url: str,
+    ) -> str:
+        """对单张图片调用一次图片描述；每次独立 session，避免污染会话上下文。"""
+        response = await provider.text_chat(
+            prompt=prompt,
+            session_id=uuid4().hex,
+            contexts=[],
+            persist=False,
+            image_urls=[image_url],
+        )
+        return str(getattr(response, "completion_text", "") or "").strip()
+
+    def _normalize_with_media(self, value: Any) -> bool:
+        """防御性解析 with_media 布尔值（null/空串回退默认 True）。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"0", "false", "no", "off", "禁用", "否"}:
+            return False
+        return True
 
     async def _chat_with_backoff(
         self,

@@ -77,6 +77,7 @@ class SubscribeFeedCommand:
         platform_name: str | None = None,
         session_defaults: dict[str, int | str] | None = None,
         bot_self_id: str = "",
+        default_handlers: list[dict] | None = None,
     ) -> CommandResult:
         """
         执行订阅命令
@@ -88,6 +89,7 @@ class SubscribeFeedCommand:
             platform_name: 平台类型名（可选）
             session_defaults: 会话默认配置（可选）
             bot_self_id: 订阅创建时所用 bot 的 self_id（合并转发节点身份，可选）
+            default_handlers: 订阅自带 handlers（如 LLM 订阅默认开启 ai_comment 时的快照）；session_defaults 显式给出 handlers 时以它为准
 
         Returns:
             CommandResult: 命令执行结果
@@ -252,6 +254,16 @@ class SubscribeFeedCommand:
                     )
                 except ValueError as exc:
                     return CommandResult(success=False, message=str(exc))
+
+        # LLM 订阅默认开启评论：把用户全局 handlers 快照 + ai_comment 写入订阅。
+        # session_defaults 显式携带 handlers 时以它为准（更具体）。
+        if default_handlers and not (session_defaults and "handlers" in session_defaults):
+            try:
+                await self._subscription_repo.update_options(
+                    subscription.id, user_id, handlers=default_handlers
+                )
+            except ValueError as exc:
+                return CommandResult(success=False, message=str(exc))
 
         return CommandResult(
             success=True,

@@ -48,6 +48,20 @@ def _get_value(source: Any, key: str, default: Any = None) -> Any:
     return getattr(source, key, default)
 
 
+def _as_bool(value: Any, default: bool = True) -> bool:
+    """把配置值防御性转成布尔（容忍字符串 "false"/"0" 等手写值）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"0", "false", "no", "off", "禁用", "否"}:
+        return False
+    return True
+
+
 def _normalize_proxy_url(value: Any) -> str:
     proxy = str(value or "").strip()
     if not proxy:
@@ -234,6 +248,13 @@ def _build_content_handler_settings(value: Any) -> ContentHandlerSettings:
         ai_persona_id=str(_get_value(value, "ai_persona_id", "") or ""),
         ai_fallback_providers=_as_tuple(
             _get_value(value, "ai_fallback_providers", None)
+        ),
+        ai_comment_image_provider_id=str(
+            _get_value(value, "ai_comment_image_provider_id", "") or ""
+        ),
+        # 缺省 True：存量配置自动走 AstrBot 消息管道（schema 自愈也会补 true）。
+        ai_comment_pipeline=_as_bool(
+            _get_value(value, "ai_comment_pipeline", True), default=True
         ),
     )
 

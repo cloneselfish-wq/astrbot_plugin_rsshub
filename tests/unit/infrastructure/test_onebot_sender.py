@@ -715,3 +715,46 @@ async def test_onebot_original_style_gif_from_downloaded_media(monkeypatch):
     assert calls[0][1][0].file == "/tmp/video.gif"
     assert isinstance(calls[0][1][1], _Plain)
     assert calls[0][1][1].text == "caption"
+
+
+@pytest.mark.asyncio
+async def test_onebot_plain_text_only_short_circuits_nodes(monkeypatch):
+    """AI 评论场景 plain_text_only=True：即使有 bot_self_id 也不构造合并转发
+    Nodes，走基类普通聊天文本发送（绝不进入伪造聊天记录）。"""
+    sender = OneBotMessageSender()
+    calls: list[tuple[str, list]] = []
+
+    async def fake_send_chain(session_id: str, chain: list, **_kwargs):
+        calls.append((session_id, chain))
+        return SendResult(ok=True)
+
+    monkeypatch.setattr(sender, "_send_chain", fake_send_chain)
+    # 有确定 bot 号：普通路径会把纯文本也包成单节点合并转发
+    monkeypatch.setattr(
+        "astrbot_plugin_rsshub.src.infrastructure.messaging.senders.onebot_sender.get_bot_self_id",
+        lambda _platform_name: "123456789",
+    )
+    # 基类发送路径：chain 是纯组件列表
+    monkeypatch.setattr(
+        sender._formatter,
+        "build_chain",
+        lambda prepared_media, text, failed_urls, platform: [
+            _Plain(text or "fallback")
+        ],
+    )
+
+    result = await sender.send_to_user(
+        SendRequest(session_id="default:GroupMessage:1", message="bot 吐槽"),
+        context=MessageContext(
+            channel=ChannelInfo(title="Feed Title"),
+            platform_name="aiocqhttp",
+            plain_text_only=True,
+        ),
+    )
+
+    assert result.ok is True
+    assert len(calls) == 1
+    chain = calls[0][1]
+    assert len(chain) == 1
+    assert isinstance(chain[0], _Plain)
+    assert chain[0].text == "bot 吐槽"

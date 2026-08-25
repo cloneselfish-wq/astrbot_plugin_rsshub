@@ -1,5 +1,63 @@
 # Changelog
 
+## [2.6.1] - 2026-08-25
+
+### Fixed
+
+修复 v2.6.0 管道模式首次真实推送（log.md）暴露的 6 个问题：
+
+- **管道图片本地化（核心修复）**：不再把 `pbs.twimg.com` 等原始图片 URL 经 `Image.fromURL` 交给 AstrBot 核心下载（核心不带插件代理，容器内直连不可达 CDN 会卡住管道 2 分钟以上且模型最终看不到图，单次评论延迟达 3 分 18 秒）。改为注入前用插件自带 `media_downloader`（带代理/图片反代/媒体反代，与转发卡片图片同链路）把图片落到本地，以 `Image.fromFileSystem` 传本地路径；单张失败 45s 短超时快速跳过，绝不阻塞管道。
+- **图片占位失真**：下载失败/成功的图片不再「虚报」——只有实际注入的 Image 组件才在 `message_str` 里对应一行「（本条消息附带 N 张条目图片）」提示，全部失败则完全不提图片，杜绝模型对着 `[图片]` 占位符幻觉编造图片内容（同时给不支持视觉的兜底模型留下准确上下文）。
+- **合成消息打标记**：`message_str` 首行固定携带 `【RSS订阅推送】` 标记，`raw_message` 携带结构化标记（`source`/`kind`/`tag`/`message_id`）。好感度、语料采集（self_learning）、情绪追踪（mood_tracker）等第三方插件可据此识别 RSS 推送并非真实群成员发言，避免「订阅者没说话好感度却 +1」「推文原文灌入学习语料」「群情绪被推文带偏」等数据污染。
+- **空 `bot_self_id` 不再静默不发**：群目标缺 `bot_self_id` 时不再构造 `At("")`（大概率过不了唤醒检查导致评论静默丢失），直接回退直连模式生成并发送。
+- **评论可观测性**：注入消息携带 `rsshub-comment-` 前缀的 `message_id`，可凭该 ID 在 AstrBot 核心日志追踪评论链路成败（StarTools 公共 API 不提供管道内结果回流，追踪标记是目前的最小可观测手段）；注入成功/失败/回退均有明确日志。
+- **回退 provider 劣化可见**：直连模式（含管道注入失败的直连回退）下，评论若由回退 provider 生成（主 provider 限流/失败，如首次推送日志中 Anthropic 连续限流 5 次后切到 deepseek-v4-flash），`handler_trace` 记录 `provider_fallback: true` 并输出 warning 日志，口吻/视觉能力劣化不再无感。
+
+## [2.6.0] - 2026-08-25
+
+### Changed
+
+- **AI 评论改走 AstrBot 完整消息管道（默认）**：新增全局配置 `content_handlers.ai_comment_pipeline`（默认开启）。开启后订阅源 bot 评论**像与 bot 对话一样生成**：插件把一条**合成消息**注入 AstrBot 完整消息管道（事件按订阅目标会话的 platform/session 入队），由此 AstrBot 管道完成其他插件的 on_message **消息交互**、人格 system prompt **加载**、livingmemory 等 on_llm_request 钩子的**记忆注入**、会话历史写入与平台投递——而不再是插件直连 `provider.text_chat`。`with_media` 时条目图片作为**原生图片组件**（`Image`）拼进合成消息，由管道按 AstrBot 自身视觉/图片描述能力读取。要点：
+  - 合成事件群聊带 `At(bot_self_id)` 唤醒、私聊自动唤醒；默认配置下评论就是一条干净普通文本（`reply_with_mention=false`、`reply_with_quote=false`），超长（默认 1500 字）才转合并转发节点。
+  - **注入失败自动回退直连**：目标平台未连接、会话无法解析、StarTools 不可用等场景下，注入返回失败即回退 v2.5.0 直连 `text_chat` 生成并发送，评论不静默丢失。
+  - **跳过即不读图**：评论只在主推送 `ok=true` 后触发；转发失败、被 `ai_filter` 拦截、通知关闭、多 bot 去重被压制等任何未实际发送的场景都不产生评论、也不读取图片（含管道读图）。
+  - trace：管道模式记录 `mode:"pipeline"`、`with_media`、`prompt_present`；直连模式保留 v2.5.0 维度。
+- **直连模式保留为开关关闭时的行为**：`ai_comment_pipeline=false` 时完全回到 v2.5.0——插件直连 `provider.text_chat` 生成正文并自行发送；`with_media` 的图片转文字走 `content_handlers.ai_comment_image_provider_id` 图片描述链（该配置项现在只在直连模式生效）。
+
+### Notes
+
+- 新增配置项 `content_handlers.ai_comment_pipeline`（默认 `true`），schema 自愈自动补全；存量配置缺省即走管道模式，无需迁移。管道模式把评论作为 bot 自己的合成消息处理，其他插件（含 livingmemory）会在该条消息上照常生效。
+
+## [2.5.0] - 2026-08-25
+
+### Added
+
+- **LLM 订阅默认开启评论**：通过对话 LLM 工具 `rss_subscribe` 订阅源时，`ai_comment` **默认开启**（除非用户明确表示不需要评论，此时传 `with_comment=false`）。为不破坏继承语义下的用户全局 handlers，订阅时做**快照合并**：把用户当前的全局 handlers 复制进该订阅，并追加一个启用的 `ai_comment`（用户全局已含 `ai_comment` 则不重复）。这样用户全局的过滤/改写需求（如简化、总结、翻译）照常生效。代价：快照冻结在订阅时刻，之后用户修改全局 handlers 不会自动流入该订阅；`/sub` 命令路径保持 `with_comment=false`，行为不变。
+- **评论基于改写前的原文生成**：`ai_comment` 针对 handler 链**输入**的原始条目（原文/原图）生成评论，与 `ai_transform` 的改写结果无关——bot 评论的是 RSS 原文，而不是被简化/总结/翻译后的版本。
+- **老订阅默认不开启评论**：`ai_comment` 的默认启用态是关闭（`default_enabled=False`），存量订阅 handlers 为空/缺省时不会凭空开启评论；只有新建 LLM 订阅（快照合并）或显式配置 `ai_comment` 才启用。
+- **评论与人格转述共存**：当订阅开启 `ai_comment`、同时配置了全局 `ai_persona_id`（人格转述）时，**推送给订阅群的正文不套用人格转述**——`ai_transform` 不再注入人格 system_prompt，但其他改写需求（简化/总结/翻译等）照常执行；人格口吻保留在**独立评论**里（评论正是 bot 用自己的口吻说话）以及 `ai_filter`。`handler_trace` 的 `ai_transform` 步骤新增 `persona_applied` 维度，便于确认正文是否套用了人格。
+- **Web 订阅编辑弹窗新增「Bot 评论」开关**：订阅列表 → 编辑 弹窗的「内容处理链」区块可直接开关评论（与下方处理链 JSON 编辑器相互独立）。开启后自动在订阅 handlers 里追加启用的 `ai_comment`，关闭则移除；评论口吻可留空（用默认）或自定义。inherit 模式下若订阅无自带处理链，会像 LLM 订阅一样**快照合并用户全局 handlers**，保证用户全局过滤/改写需求不被静默清空；老订阅字段为空/缺省依旧默认不评论。
+
+### Notes
+
+- 不新增配置项、不做 DB 迁移；LLM 工具 schema 为 `rss_subscribe` 增加可选参数 `with_comment`（默认 `true`），Web 更新订阅接口 `/subscriptions/update` 的 options 增加可选 `ai_comment`（`{"enabled": bool, "prompt": str}`），由后端 reconcile 进订阅 handlers。存量订阅/用户 handlers 行为不变。
+
+## [2.4.0] - 2026-08-25
+
+### Added
+
+- **AI 评论（ai_comment）**：新增订阅级内置 handler `ai_comment`。开启后 bot 会像人一样解读这条推送（文字+图片），在**合并转发（伪造聊天记录）成功发送之后**，作为**一条独立普通聊天消息**单独发送一段吐槽/观点/看法的评论，效果是 bot 真正在和群里的人一起看。要点：
+  - 评论**绝不合并进伪造聊天记录**：发送链路新增 `plain_text_only` 标记，OneBot 下即使有 `bot_self_id` 也不构造合并转发 Nodes，走普通聊天文本发送；发送目标同时清空 `bot_self_id` 双保险。Telegram / QQ 官方等继承基类的平台天然不受影响。
+  - 评论在**转发成功后才发送**：转发失败、被 `ai_filter` 拦截、通知关闭、多 bot 去重被压制等任何未实际发送的场景都**不产生评论**；评论发送失败仅记 warning，不影响主推送历史与统计。
+  - `config.prompt`（必填）定义评论口吻/角度；`config.with_media`（默认开启）让 bot 阅读条目图片。图片经图片描述模型逐张转文字后并入评论上下文；单图失败只跳过，不阻断评论。
+  - 图片转文字模型走配置链：插件设置 `content_handlers.ai_comment_image_provider_id` → AstrBot `provider_settings.default_image_caption_provider_id` → `provider_ltm_settings.image_caption_provider_id` → 当前对话 provider。全部未配置时评论只看文字。
+  - 评论生成 fail-open：prompt 缺失、provider 不可用、调用异常都只产生空评论并在 `handler_trace` 记录 `fallback`/`fallback_reason`，主推送链路不受影响。`handler_trace` 新增 `with_media` / `images_read` / `commentary_present` / `commentary_length` / `model_id` 维度。
+  - 开关与 `ai_filter` / `ai_transform` 一致，可通过 LLM 工具 `rss_set_subscription_handlers` / `rss_set_user_handlers` 设置；`rss_list_handlers` 与 Web 面板自动列出该 handler。订阅级/用户级继承语义（inherit/override/disabled）免费复用。
+
+### Notes
+
+- 纯新增 handler 与配置项，无 DB 迁移；存量配置 schema 自愈自动补 `ai_comment_image_provider_id: ""`。不配置 `ai_comment` handler 时行为与 v2.3.1 完全一致。
+
 ## [2.3.1] - 2026-08-23
 
 ### Added

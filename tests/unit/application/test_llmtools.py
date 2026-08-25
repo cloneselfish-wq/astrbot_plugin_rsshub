@@ -89,7 +89,7 @@ async def test_llm_tool_list_handlers_returns_registry_schema():
 
     data = json.loads(result)
     names = {item["name"] for item in data["items"]}
-    assert names == {"ai_filter", "ai_transform"}
+    assert names == {"ai_filter", "ai_transform", "ai_comment"}
     ai_filter = next(item for item in data["items"] if item["name"] == "ai_filter")
     assert any(field["key"] == "input_scope" for field in ai_filter["schema"])
     ai_transform = next(
@@ -100,6 +100,9 @@ async def test_llm_tool_list_handlers_returns_registry_schema():
     )
     assert scope_field["default"] == "plaintext"
     assert scope_field["options"] == ["plaintext", "xml"]
+    ai_comment = next(item for item in data["items"] if item["name"] == "ai_comment")
+    assert any(field["key"] == "prompt" for field in ai_comment["schema"])
+    assert any(field["key"] == "with_media" for field in ai_comment["schema"])
 
 
 @pytest.mark.asyncio
@@ -114,7 +117,11 @@ async def test_llm_tool_rss_subscribe_schema_only_exposes_targets():
             "type": "array",
             "items": {"type": "string"},
             "description": "订阅目标数组；每项可为完整 RSS URL 或 RSSHub 路由路径，例如 /twitter/user/123。",
-        }
+        },
+        "with_comment": {
+            "type": "boolean",
+            "description": "是否开启 bot 评论（订阅推送后单独发一条吐槽/看法）。默认 true；用户明确说不要评论时传 false。",
+        },
     }
     assert tool.parameters["required"] == ["targets"]
 
@@ -126,7 +133,7 @@ async def test_llm_tool_rss_subscribe_schema_does_not_expose_legacy_params():
     tools = build_llm_tools(deps=deps, plugin_context=plugin_ctx)
     tool = next(t for t in tools if t.name == "rss_subscribe")
 
-    assert set(tool.parameters["properties"]) == {"targets"}
+    assert set(tool.parameters["properties"]) == {"targets", "with_comment"}
     assert "url" not in tool.parameters["properties"]
     assert "interval" not in tool.parameters["properties"]
     assert "targets" in tool.parameters["properties"]
@@ -260,6 +267,88 @@ async def test_llm_tool_rss_subscribe_empty_targets_returns_error_without_subscr
 
     assert "订阅目标不能为空" in result
     deps["subscribe_cmd"].execute.assert_not_called()
+
+
+def _global_transform_handler():
+    return {
+        "id": "builtin.ai_transform.default",
+        "type": "builtin",
+        "name": "ai_transform",
+        "status": 1,
+        "config": {"prompt": "压缩成简短摘要", "scope": "plaintext"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_tool_rss_subscribe_defaults_comment_and_merges_user_handlers():
+    deps = _build_deps()
+    deps["get_user_settings_cmd"].execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True, data={"handlers": [_global_transform_handler()]}
+        )
+    )
+    deps["subscribe_cmd"].execute = AsyncMock(
+        return_value=SimpleNamespace(success=True, message="订阅成功")
+    )
+    ctx, plugin_ctx = _make_ctx()
+    tools = build_llm_tools(deps=deps, plugin_context=plugin_ctx)
+    tool = next(t for t in tools if t.name == "rss_subscribe")
+
+    result = await tool.handler(ctx, ["https://example.com/rss.xml"])
+
+    assert result == "订阅成功"
+    call = deps["subscribe_cmd"].execute.await_args_list[0]
+    handlers = call.kwargs["default_handlers"]
+    assert [h["name"] for h in handlers] == ["ai_transform", "ai_comment"]
+    comment = handlers[-1]
+    assert comment["status"] == 1
+    assert comment["config"]["with_media"] is True
+
+
+@pytest.mark.asyncio
+async def test_llm_tool_rss_subscribe_with_comment_false_skips_default_handlers():
+    deps = _build_deps()
+    deps["subscribe_cmd"].execute = AsyncMock(
+        return_value=SimpleNamespace(success=True, message="订阅成功")
+    )
+    ctx, plugin_ctx = _make_ctx()
+    tools = build_llm_tools(deps=deps, plugin_context=plugin_ctx)
+    tool = next(t for t in tools if t.name == "rss_subscribe")
+
+    result = await tool.handler(ctx, ["https://example.com/rss.xml"], False)
+
+    assert result == "订阅成功"
+    call = deps["subscribe_cmd"].execute.await_args_list[0]
+    assert call.kwargs.get("default_handlers") is None
+    deps["get_user_settings_cmd"].execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_llm_tool_rss_subscribe_does_not_duplicate_existing_ai_comment():
+    existing_comment = {
+        "id": "builtin.ai_comment.custom",
+        "type": "builtin",
+        "name": "ai_comment",
+        "status": 1,
+        "config": {"prompt": "我的自定义评论要求", "with_media": False},
+    }
+    deps = _build_deps()
+    deps["get_user_settings_cmd"].execute = AsyncMock(
+        return_value=SimpleNamespace(success=True, data={"handlers": [existing_comment]})
+    )
+    deps["subscribe_cmd"].execute = AsyncMock(
+        return_value=SimpleNamespace(success=True, message="订阅成功")
+    )
+    ctx, plugin_ctx = _make_ctx()
+    tools = build_llm_tools(deps=deps, plugin_context=plugin_ctx)
+    tool = next(t for t in tools if t.name == "rss_subscribe")
+
+    await tool.handler(ctx, ["https://example.com/rss.xml"])
+
+    call = deps["subscribe_cmd"].execute.await_args_list[0]
+    handlers = call.kwargs["default_handlers"]
+    assert [h["name"] for h in handlers] == ["ai_comment"]
+    assert handlers[0]["config"]["prompt"] == "我的自定义评论要求"
 
 
 @pytest.mark.asyncio

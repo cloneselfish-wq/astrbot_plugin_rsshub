@@ -10,6 +10,7 @@ import {
 } from '../../js/api.js';
 import {
   buildHandlersFromEditorState,
+  extractCommentState,
   normalizeTagValues,
   normalizeTextFilterValue,
   inheritedNumberToPayload,
@@ -241,6 +242,20 @@ export const subscriptionsModule = {
         JSON.stringify(editorHandlers) !== JSON.stringify(originalHandlers);
       if (options.handlers_mode === 'override' || handlersChanged) {
         options.handlers = editorHandlers;
+      }
+      // Bot 评论开关：与上方处理链 JSON 相互独立，仅在变化时下发，
+      // 由后端 reconcile 进订阅 handlers 链（inherit 空链时快照合并用户全局链）。
+      const originalComment = extractCommentState(this.editForm._originalHandlers);
+      const commentChanged =
+        Boolean(this.editForm.comment_enabled) !==
+          Boolean(originalComment.comment_enabled) ||
+        String(this.editForm.comment_prompt || '') !==
+          String(originalComment.comment_prompt || '');
+      if (commentChanged) {
+        options.ai_comment = {
+          enabled: Boolean(this.editForm.comment_enabled),
+          prompt: String(this.editForm.comment_prompt || ''),
+        };
       }
       options.state = this.editForm.state_ ? 1 : 0;
       options.notify = this.editForm.notify;

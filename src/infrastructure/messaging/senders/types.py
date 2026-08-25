@@ -125,6 +125,7 @@ class MessageContext:
     sender_strategy: Any = None
     event: Any = None  # AstrBot event object for platform-specific features (e.g., NapCat stream)
     bot_self_id: str = ""  # 订阅创建时所用 bot 的 self_id（合并转发节点身份）
+    plain_text_only: bool = False  # 只按普通聊天文本发送，不构造合并转发
 
 
 @dataclass
