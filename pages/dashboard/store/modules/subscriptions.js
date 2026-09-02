@@ -11,6 +11,7 @@ import {
 import {
   buildHandlersFromEditorState,
   extractCommentState,
+  extractMergeConditionState,
   normalizeTagValues,
   normalizeTextFilterValue,
   inheritedNumberToPayload,
@@ -255,6 +256,20 @@ export const subscriptionsModule = {
         options.ai_comment = {
           enabled: Boolean(this.editForm.comment_enabled),
           prompt: String(this.editForm.comment_prompt || ''),
+        };
+      }
+      // 合并转发条件开关：与上方处理链 JSON 相互独立，仅在变化时下发，
+      // 由后端 reconcile 进订阅 handlers 链（inherit 空链时快照合并用户全局链）。
+      const originalMerge = extractMergeConditionState(this.editForm._originalHandlers);
+      const mergeChanged =
+        Boolean(this.editForm.merge_enabled) !== Boolean(originalMerge.merge_enabled) ||
+        Number(this.editForm.merge_max_chars) !== Number(originalMerge.merge_max_chars) ||
+        Number(this.editForm.merge_max_images) !== Number(originalMerge.merge_max_images);
+      if (mergeChanged) {
+        options.merge_condition = {
+          enabled: Boolean(this.editForm.merge_enabled),
+          max_chars: Number(this.editForm.merge_max_chars),
+          max_images: Number(this.editForm.merge_max_images),
         };
       }
       options.state = this.editForm.state_ ? 1 : 0;

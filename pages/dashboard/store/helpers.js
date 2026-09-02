@@ -118,6 +118,24 @@ export function extractCommentState(handlers) {
   };
 }
 
+// 订阅编辑弹窗的「合并转发条件」开关状态，从 handlers 链派生。
+// 与后端 is_handler_enabled 语义一致：status=1 视为开启，其余视为关闭。
+export const MERGE_CONDITION_HANDLER_NAME = 'merge_condition';
+
+export function extractMergeConditionState(handlers) {
+  const normalized = normalizeHandlers(handlers || []);
+  const merge = normalized.find(
+    (h) => String(h.name || '').trim() === MERGE_CONDITION_HANDLER_NAME
+  );
+  const enabled = Boolean(merge && Number(merge.status) === 1);
+  const config = merge?.config || {};
+  return {
+    merge_enabled: enabled,
+    merge_max_chars: enabled ? Number(config.max_chars ?? 80) : 80,
+    merge_max_images: enabled ? Number(config.max_images ?? 1) : 1,
+  };
+}
+
 export function createTagFilter() {
   return {
     values: [],
@@ -189,6 +207,9 @@ export function createEmptyEditForm() {
     handlers_json: '[]',
     comment_enabled: false,
     comment_prompt: '',
+    merge_enabled: false,
+    merge_max_chars: 80,
+    merge_max_images: 1,
     _originalHandlers: [],
   };
 }
@@ -219,6 +240,7 @@ export function createEditFormFromSub(sub) {
     handlers_mode: sub.handlers_mode || 'inherit',
     ...handlersToEditorState(sub.handlers),
     ...extractCommentState(sub.handlers),
+    ...extractMergeConditionState(sub.handlers),
     _originalHandlers: normalizeHandlers(sub.handlers),
   };
 }

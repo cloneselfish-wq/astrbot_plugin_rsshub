@@ -10,6 +10,7 @@
   - **可被 LLM 工具修改**：`rss_list_handlers` / `rss_set_subscription_handlers` 工具描述已更新，AI 可通过工具调用为订阅配置 merge_condition 及其 `max_chars`/`max_images`。
   - **链路复用**：命中后通过 `direct_send` 决策透传到发送层 `plain_text_only=True`，走基类图文普通消息（与 ai_comment 独立评论发送同链路），OneBot 下不构造合并转发 Nodes。
   - 建议在 handler 链中置于 `ai_transform` 之后，以便对最终改写后的内容做判断。
+  - **订阅编辑面板图形化配置**：无需手写处理链 JSON，订阅编辑弹窗新增「合并转发条件」开关 + 字符数阈值 / 图片数阈值两个输入框，保存时由后端 reconcile 进订阅 handlers（与「Bot 评论」开关同机制，inherit 空链时快照合并用户全局链）。
 
 ## [2.6.2] - 2026-08-28
 

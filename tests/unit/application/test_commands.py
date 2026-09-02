@@ -717,3 +717,176 @@ class TestTestSubscriptionCommand:
             "https://example.com/rss.xml",
             verbose=True,
         )
+
+
+class TestUpdateSubscriptionMergeCondition:
+    """测试「合并转发条件」开关的 reconcile 逻辑"""
+
+    @staticmethod
+    def _merge_handler(max_chars=80, max_images=1, handler_id="builtin.merge_condition.default", status=1):
+        return {
+            "id": handler_id,
+            "type": "builtin",
+            "name": "merge_condition",
+            "status": status,
+            "config": {"max_chars": max_chars, "max_images": max_images},
+        }
+
+    def test_reconcile_disable_removes_merge_condition(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            _reconcile_merge_condition_handlers,
+        )
+
+        base = [
+            self._merge_handler(),
+            {"id": "x", "type": "builtin", "name": "ai_filter", "status": 1, "config": {}},
+        ]
+        out = _reconcile_merge_condition_handlers(
+            base,
+            enabled=False,
+            max_chars=None,
+            max_images=None,
+            user_handlers=[],
+            mode="override",
+        )
+        assert [h["name"] for h in out] == ["ai_filter"]
+
+    def test_reconcile_enable_empty_inherit_snapshots_user_handlers(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            _reconcile_merge_condition_handlers,
+        )
+
+        user_handlers = [
+            {"id": "u1", "type": "builtin", "name": "ai_filter", "status": 1, "config": {}}
+        ]
+        out = _reconcile_merge_condition_handlers(
+            [],
+            enabled=True,
+            max_chars=50,
+            max_images=2,
+            user_handlers=user_handlers,
+            mode="inherit",
+        )
+        assert [h["name"] for h in out] == ["ai_filter", "merge_condition"]
+        assert out[-1]["status"] == 1
+        assert out[-1]["config"] == {"max_chars": 50, "max_images": 2}
+
+    def test_reconcile_enable_override_does_not_snapshot(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            _reconcile_merge_condition_handlers,
+        )
+
+        out = _reconcile_merge_condition_handlers(
+            [],
+            enabled=True,
+            max_chars=100,
+            max_images=3,
+            user_handlers=[{"id": "u1", "name": "ai_filter", "status": 1, "config": {}}],
+            mode="override",
+        )
+        assert [h["name"] for h in out] == ["merge_condition"]
+        assert out[0]["config"] == {"max_chars": 100, "max_images": 3}
+
+    def test_reconcile_enable_existing_upsert_preserves_id_and_omitted_field(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            _reconcile_merge_condition_handlers,
+        )
+
+        existing = self._merge_handler(handler_id="builtin.merge_condition.custom")
+        out = _reconcile_merge_condition_handlers(
+            [existing],
+            enabled=True,
+            max_chars=120,
+            max_images=None,
+            user_handlers=[],
+            mode="override",
+        )
+        assert len(out) == 1
+        assert out[0]["id"] == "builtin.merge_condition.custom"
+        # max_images 未传，保留原值 1
+        assert out[0]["config"] == {"max_chars": 120, "max_images": 1}
+
+    def test_reconcile_enable_none_thresholds_use_defaults(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            _reconcile_merge_condition_handlers,
+        )
+
+        out = _reconcile_merge_condition_handlers(
+            [],
+            enabled=True,
+            max_chars=None,
+            max_images=None,
+            user_handlers=[],
+            mode="override",
+        )
+        assert out[0]["config"] == {"max_chars": 80, "max_images": 1}
+
+    @pytest.mark.asyncio
+    async def test_execute_merge_condition_spec_reconciles_handlers(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            UpdateSubscriptionCommand,
+        )
+        from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+        sub = Subscription(id=1, user_id="user123", feed_id=1, handlers_mode="override")
+        sub_repo = MagicMock()
+        sub_repo.get_by_id = AsyncMock(return_value=sub)
+        sub_repo.update_options = AsyncMock(return_value=sub)
+
+        cmd = UpdateSubscriptionCommand(
+            subscription_repo=sub_repo,
+            get_user_settings_cmd=None,
+        )
+        result = await cmd.execute(
+            sub_id=1,
+            user_id="user123",
+            handlers_mode="override",
+            merge_condition={"enabled": True, "max_chars": 42, "max_images": 2},
+        )
+
+        assert result.success is True
+        handlers = sub_repo.update_options.await_args.kwargs["handlers"]
+        assert [h["name"] for h in handlers] == ["merge_condition"]
+        assert handlers[0]["config"] == {"max_chars": 42, "max_images": 2}
+
+    @pytest.mark.asyncio
+    async def test_execute_merge_condition_disable_removes_handler(self):
+        from astrbot_plugin_rsshub.src.application.commands.update_subscription_cmd import (
+            UpdateSubscriptionCommand,
+        )
+        from astrbot_plugin_rsshub.src.domain.entities.subscription import Subscription
+
+        sub = Subscription(
+            id=1,
+            user_id="user123",
+            feed_id=1,
+            handlers_mode="override",
+            handlers=[
+                self._merge_handler(),
+                {
+                    "id": "builtin.ai_filter.default",
+                    "type": "builtin",
+                    "name": "ai_filter",
+                    "status": 1,
+                    "config": {"prompt": "keep important"},
+                },
+            ],
+        )
+        sub_repo = MagicMock()
+        sub_repo.get_by_id = AsyncMock(return_value=sub)
+        sub_repo.update_options = AsyncMock(return_value=sub)
+
+        cmd = UpdateSubscriptionCommand(
+            subscription_repo=sub_repo,
+            get_user_settings_cmd=None,
+        )
+        result = await cmd.execute(
+            sub_id=1,
+            user_id="user123",
+            handlers_mode="override",
+            merge_condition={"enabled": False},
+        )
+
+        assert result.success is True
+        handlers = sub_repo.update_options.await_args.kwargs["handlers"]
+        assert [h["name"] for h in handlers] == ["ai_filter"]

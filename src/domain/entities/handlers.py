@@ -542,3 +542,39 @@ def build_ai_comment_handler(
             },
         }
     ]
+
+
+DEFAULT_MERGE_MAX_CHARS = 80
+DEFAULT_MERGE_MAX_IMAGES = 1
+
+
+def build_merge_condition_handler(
+    max_chars: int = DEFAULT_MERGE_MAX_CHARS,
+    max_images: int = DEFAULT_MERGE_MAX_IMAGES,
+) -> list[dict[str, Any]]:
+    """Build a default-enabled merge_condition handler.
+
+    Used by the subscription update path when the dashboard toggle enables the
+    ``合并转发条件`` shortcut: short entries (few chars, few images, no video/
+    audio/file) get sent as a plain image+text message instead of a merge card.
+    """
+    try:
+        chars = int(max_chars)
+    except (TypeError, ValueError):
+        chars = DEFAULT_MERGE_MAX_CHARS
+    try:
+        images = int(max_images)
+    except (TypeError, ValueError):
+        images = DEFAULT_MERGE_MAX_IMAGES
+    return [
+        {
+            "id": "builtin.merge_condition.default",
+            "type": HandlerType.BUILTIN.value,
+            "name": "merge_condition",
+            "status": HANDLER_STATUS_ENABLED,
+            "config": {
+                "max_chars": chars,
+                "max_images": images,
+            },
+        }
+    ]

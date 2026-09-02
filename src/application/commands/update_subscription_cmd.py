@@ -10,8 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from ...domain.entities.handlers import (
     DEFAULT_AI_COMMENT_PROMPT,
+    DEFAULT_MERGE_MAX_CHARS,
+    DEFAULT_MERGE_MAX_IMAGES,
     HANDLER_STATUS_ENABLED,
     build_ai_comment_handler,
+    build_merge_condition_handler,
     parse_handlers_input,
 )
 from ...domain.entities.subscription import SUPPORTED_HANDLERS_MODES
@@ -39,6 +42,17 @@ STRING_OPTIONS = {
 JSON_OPTIONS = {"handlers"}
 
 COMMENT_HANDLER_NAME = "ai_comment"
+MERGE_CONDITION_HANDLER_NAME = "merge_condition"
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    """把可选阈值强转为 int；None / 非法值返回 None（表示不改动）。"""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _reconcile_ai_comment_handlers(
@@ -107,6 +121,75 @@ def _reconcile_ai_comment_handlers(
     return base
 
 
+def _reconcile_merge_condition_handlers(
+    base_handlers: list[dict[str, Any]],
+    *,
+    enabled: bool,
+    max_chars: int | None,
+    max_images: int | None,
+    user_handlers: list[dict[str, Any]],
+    mode: str,
+) -> list[dict[str, Any]]:
+    """把「合并转发条件」开关落进订阅 handlers 链。
+
+    语义与 ai_comment 开关一致：
+    - 启用：inherit 且订阅链去掉 merge_condition 后为空时，先快照用户全局
+      handlers，避免清空全局改写需求；随后 upsert 一个启用的 merge_condition。
+    - 关闭：从订阅链移除 merge_condition。
+    """
+    base = [dict(h) for h in base_handlers or []]
+
+    if not enabled:
+        return [
+            h
+            for h in base
+            if str(h.get("name", "")).strip() != MERGE_CONDITION_HANDLER_NAME
+        ]
+
+    others = [
+        h
+        for h in base
+        if str(h.get("name", "")).strip() != MERGE_CONDITION_HANDLER_NAME
+    ]
+    if mode == "inherit" and not others:
+        base = [dict(h) for h in user_handlers or []]
+
+    existing_idx = next(
+        (
+            i
+            for i, h in enumerate(base)
+            if str(h.get("name", "")).strip() == MERGE_CONDITION_HANDLER_NAME
+        ),
+        None,
+    )
+    if existing_idx is not None:
+        existing = base[existing_idx]
+        config = dict(existing.get("config") or {})
+        if max_chars is not None:
+            config["max_chars"] = max_chars
+        if max_images is not None:
+            config["max_images"] = max_images
+        config.setdefault("max_chars", DEFAULT_MERGE_MAX_CHARS)
+        config.setdefault("max_images", DEFAULT_MERGE_MAX_IMAGES)
+        base[existing_idx] = {
+            "id": str(existing.get("id") or "").strip()
+            or "builtin.merge_condition.default",
+            "type": "builtin",
+            "name": MERGE_CONDITION_HANDLER_NAME,
+            "status": HANDLER_STATUS_ENABLED,
+            "config": config,
+        }
+        return base
+
+    base.extend(
+        build_merge_condition_handler(
+            max_chars if max_chars is not None else DEFAULT_MERGE_MAX_CHARS,
+            max_images if max_images is not None else DEFAULT_MERGE_MAX_IMAGES,
+        )
+    )
+    return base
+
+
 class UpdateSubscriptionCommand:
     """
     更新订阅选项命令
@@ -145,8 +228,10 @@ class UpdateSubscriptionCommand:
                 success=False,
                 message=("订阅翻译选项已移除: " + ", ".join(removed)),
             )
-        # ai_comment 开关不直接落库，由命令在归一化后 reconcile 进 handlers。
+        # ai_comment / merge_condition 开关不直接落库，由命令在归一化后
+        # reconcile 进 handlers。
         comment_spec = options.pop("ai_comment", None)
+        merge_spec = options.pop("merge_condition", None)
 
         normalized_options = {}
         for key, value in options.items():
@@ -183,6 +268,16 @@ class UpdateSubscriptionCommand:
             error = await self._apply_ai_comment_option(
                 normalized_options,
                 comment_spec,
+                sub_id,
+                user_id,
+            )
+            if error:
+                return CommandResult(success=False, message=error)
+
+        if merge_spec is not None:
+            error = await self._apply_merge_condition_option(
+                normalized_options,
+                merge_spec,
                 sub_id,
                 user_id,
             )
@@ -257,6 +352,56 @@ class UpdateSubscriptionCommand:
             base or [],
             enabled=enabled,
             prompt=prompt,
+            user_handlers=user_handlers,
+            mode=str(mode or "").strip().lower(),
+        )
+        return None
+
+    async def _apply_merge_condition_option(
+        self,
+        normalized_options: dict,
+        spec: Any,
+        sub_id: int,
+        user_id: str,
+    ) -> str | None:
+        """根据「合并转发条件」开关 reconcile handlers，返回错误消息或 None。
+
+        spec 接受 ``True/False`` 或
+        ``{"enabled": bool, "max_chars": int, "max_images": int}``。
+        """
+        if isinstance(spec, bool):
+            enabled, max_chars, max_images = spec, None, None
+        elif isinstance(spec, dict):
+            enabled = bool(spec.get("enabled"))
+            max_chars = _coerce_optional_int(spec.get("max_chars"))
+            max_images = _coerce_optional_int(spec.get("max_images"))
+        else:
+            return None
+
+        base = normalized_options.get("handlers")
+        mode = normalized_options.get("handlers_mode")
+        if base is None or mode is None:
+            current = await self._subscription_repo.get_by_id(sub_id)
+            if not current or current.user_id != user_id:
+                return f"订阅不存在或无权修改 (ID: {sub_id})"
+            if base is None:
+                base = current.get_handlers()
+            if mode is None:
+                mode = current.handlers_mode
+
+        # 处理链整体禁用时开关不生效，保持现状。
+        if str(mode or "").strip().lower() == "disabled":
+            return None
+
+        user_handlers: list[dict[str, Any]] = []
+        if enabled and self._get_user_settings_cmd is not None:
+            user_handlers = await self._fetch_user_handlers(user_id)
+
+        normalized_options["handlers"] = _reconcile_merge_condition_handlers(
+            base or [],
+            enabled=enabled,
+            max_chars=max_chars,
+            max_images=max_images,
             user_handlers=user_handlers,
             mode=str(mode or "").strip().lower(),
         )
