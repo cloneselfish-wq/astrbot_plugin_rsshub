@@ -248,6 +248,9 @@ class HandlerProcessResult:
     trace: tuple[dict[str, Any], ...] = ()
     commentary: str = ""  # ai_comment 直连模式生成的评论正文；空表示无评论
     comment_trigger: AiCommentTrigger | None = None  # ai_comment 管道模式触发载荷
+    # merge_condition 命中的发送方式决策：True=直接发图文（plain_text_only），
+    # False=合并转发；None=未配置该 handler（保持默认合并转发）。
+    direct_send: bool | None = None
 
 
 class ContentHandlerRuntime:
@@ -321,6 +324,7 @@ class ContentHandlerRuntime:
         trace: list[dict[str, Any]] = []
         commentary = ""
         comment_trigger: AiCommentTrigger | None = None
+        direct_send: bool | None = None
         resolved = self.resolve_handlers(subscription=subscription, user=user)
         # ai_comment 开启时：推送给订阅群的正文不套用全局人格转述，
         # 人格只保留在独立评论（bot 用自己的口吻说话）与 ai_filter。
@@ -440,6 +444,22 @@ class ContentHandlerRuntime:
                             **comment_trace,
                         }
                     )
+                elif spec.name == "merge_condition":
+                    # 纯本地规则判断，不调 LLM。基于当前（可能已被改写的）条目
+                    # 判断是否足够简短，命中则 direct_send=True（直接发图文），
+                    # 否则保持合并转发。建议在链中置于 ai_transform 之后，
+                    # 以便对最终要发送的内容做判断。
+                    direct_send, merge_trace = self._run_merge_condition(
+                        result, spec.config
+                    )
+                    trace.append(
+                        {
+                            "id": spec.id,
+                            "name": spec.name,
+                            "status": HandlerTraceStatus.OK.value,
+                            **merge_trace,
+                        }
+                    )
                 else:
                     logger.debug("未知内置 handler，已跳过: %s", spec.name)
                     trace.append(
@@ -469,6 +489,7 @@ class ContentHandlerRuntime:
             trace=tuple(trace),
             commentary=commentary,
             comment_trigger=comment_trigger,
+            direct_send=direct_send,
         )
 
     async def _run_ai_transform(
@@ -745,6 +766,53 @@ class ContentHandlerRuntime:
         if reason_max_length > 0 and len(reason) > reason_max_length:
             reason = reason[:reason_max_length].rstrip()
         return bool(parsed["allow"]), reason, provider_id
+
+    @staticmethod
+    def _run_merge_condition(
+        entry: EntryContentContext,
+        config: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        """纯本地规则判断是否直接发送（不合并转发），零 LLM 调用。
+
+        命中条件：标题+正文总字符数不超过 max_chars，且图片数不超过 max_images，
+        且不存在视频/音频/文件等富媒体（富媒体仍需合并转发节点承载）。
+        返回 ``(direct_send, trace)``；direct_send=True 表示直接发图文。
+        """
+        try:
+            max_chars = int((config or {}).get("max_chars", 80))
+        except (TypeError, ValueError):
+            max_chars = 80
+        try:
+            max_images = int((config or {}).get("max_images", 1))
+        except (TypeError, ValueError):
+            max_images = 1
+
+        text_len = len(entry.title or "") + len(entry.content or "")
+        image_count = 0
+        has_rich_media = False
+        media_items = entry.media_items or ()
+        if media_items:
+            for media_type, _url in media_items:
+                kind = str(media_type or "").strip().lower()
+                if kind == "image":
+                    image_count += 1
+                elif kind in {"video", "audio", "file"}:
+                    has_rich_media = True
+        elif entry.media_urls:
+            # 无类型信息时把全部媒体按图片近似统计。
+            image_count = len(entry.media_urls)
+
+        direct_send = bool(
+            text_len <= max_chars and image_count <= max_images and not has_rich_media
+        )
+        return direct_send, {
+            "max_chars": max_chars,
+            "max_images": max_images,
+            "text_len": text_len,
+            "image_count": image_count,
+            "has_rich_media": has_rich_media,
+            "direct_send": direct_send,
+        }
 
     async def _run_ai_comment(
         self,

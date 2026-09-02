@@ -100,6 +100,7 @@ class PreparedSubscriptionDispatch:
     persisted_media_urls: list[str] | None
     commentary: str = ""  # ai_comment 直连模式生成的评论正文；转发成功后单独发送
     comment_trigger: AiCommentTrigger | None = None  # ai_comment 管道模式触发载荷
+    direct_send: bool | None = None  # merge_condition 命中：True=直接发图文，False=合并转发
 
 
 def is_unrecoverable_error(error: str) -> bool:
@@ -706,6 +707,7 @@ class NotificationDispatcher:
                     handler_reason = ""
                     handler_commentary = ""
                     handler_comment_trigger: AiCommentTrigger | None = None
+                    handler_direct_send: bool | None = None
                     if raw_entry is not None:
                         handler_result = await self._content_handler_runtime.process_entry_with_trace(
                             subscription=sub,
@@ -726,6 +728,7 @@ class NotificationDispatcher:
                             handler_result.commentary or ""
                         ).strip()
                         handler_comment_trigger = handler_result.comment_trigger
+                        handler_direct_send = handler_result.direct_send
                     if processed_entry is not None and processed_entry.layout:
                         layouts_to_cleanup.append(processed_entry.layout)
 
@@ -884,6 +887,7 @@ class NotificationDispatcher:
                             ),
                             commentary=handler_commentary,
                             comment_trigger=handler_comment_trigger,
+                            direct_send=handler_direct_send,
                         )
                     )
 
@@ -1018,6 +1022,7 @@ class NotificationDispatcher:
                         sub_id=sub.id,
                         send_mode=prepared.effective_send_mode,
                         style=prepared.effective_style,
+                        plain_text_only=prepared.direct_send is True,
                     )
 
                     # 5. 更新推送状态

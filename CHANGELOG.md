@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.7.0] - 2026-09-02
+
+### Added
+
+- **合并转发条件（merge_condition）**：新增订阅级内置 handler，纯本地规则判断、零 LLM 调用。当一条推送足够简短时不再用合并转发（伪造聊天记录）卡片，而是把图片+文字作为一条普通消息直接发出。命中条件：标题+正文总字符数不超过 `max_chars`、图片数不超过 `max_images`、且不含视频/音频/文件等富媒体。要点：
+  - **per-订阅独立阈值**：`config.max_chars`（默认 80）/ `config.max_images`（默认 1）挂在各订阅自己的 handlers 上，不同群订阅同一源可各自配置不同阈值（例如群 A 订阅马斯克 ≤50 字+≤1 图、群 B 订阅马斯克 ≤100 字+≤2 图，互不影响）。
+  - **富媒体始终合并转发**：存在视频/音频/文件时，即使字符数/图片数达标也仍走合并转发节点承载，不直接发送。
+  - **可被 LLM 工具修改**：`rss_list_handlers` / `rss_set_subscription_handlers` 工具描述已更新，AI 可通过工具调用为订阅配置 merge_condition 及其 `max_chars`/`max_images`。
+  - **链路复用**：命中后通过 `direct_send` 决策透传到发送层 `plain_text_only=True`，走基类图文普通消息（与 ai_comment 独立评论发送同链路），OneBot 下不构造合并转发 Nodes。
+  - 建议在 handler 链中置于 `ai_transform` 之后，以便对最终改写后的内容做判断。
+
 ## [2.6.2] - 2026-08-28
 
 ### Added

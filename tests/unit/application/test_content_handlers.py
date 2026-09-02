@@ -276,3 +276,120 @@ async def test_pipeline_mode_ai_filter_block_clears_trigger():
     assert result.comment_trigger is None
     names = [t["name"] for t in result.trace]
     assert "ai_comment" not in names
+
+
+# ---- merge_condition（合并转发条件，纯本地规则判断）----
+
+
+def _merge_subscription(config: dict | None = None) -> Subscription:
+    return _comment_subscription(
+        handlers=[
+            {
+                "id": "builtin.merge_condition.default",
+                "type": "builtin",
+                "name": "merge_condition",
+                "status": 1,
+                "config": config or {"max_chars": 80, "max_images": 1},
+            }
+        ]
+    )
+
+
+def test_merge_condition_short_text_few_images_direct_send():
+    entry = _entry(
+        content="短",
+        media_items=(("image", "https://example.com/1.jpg"),),
+        media_urls=("https://example.com/1.jpg",),
+    )
+    direct_send, trace = ContentHandlerRuntime._run_merge_condition(
+        entry, {"max_chars": 80, "max_images": 1}
+    )
+    assert direct_send is True
+    assert trace["text_len"] == len("标题") + len("短")
+    assert trace["image_count"] == 1
+    assert trace["has_rich_media"] is False
+
+
+def test_merge_condition_long_text_stays_forward():
+    entry = _entry(content="长" * 100)
+    direct_send, _ = ContentHandlerRuntime._run_merge_condition(
+        entry, {"max_chars": 80, "max_images": 1}
+    )
+    assert direct_send is False
+
+
+def test_merge_condition_many_images_stays_forward():
+    entry = _entry(
+        media_items=(
+            ("image", "https://example.com/1.jpg"),
+            ("image", "https://example.com/2.jpg"),
+        ),
+    )
+    direct_send, trace = ContentHandlerRuntime._run_merge_condition(
+        entry, {"max_chars": 80, "max_images": 1}
+    )
+    assert direct_send is False
+    assert trace["image_count"] == 2
+
+
+def test_merge_condition_video_stays_forward():
+    entry = _entry(
+        content="短",
+        media_items=(("video", "https://example.com/1.mp4"),),
+    )
+    direct_send, trace = ContentHandlerRuntime._run_merge_condition(
+        entry, {"max_chars": 80, "max_images": 1}
+    )
+    assert direct_send is False
+    assert trace["has_rich_media"] is True
+
+
+def test_merge_condition_defaults_when_config_missing():
+    # 未配置 config 时回落默认 max_chars=80 / max_images=1
+    entry = _entry(content="短", media_items=(("image", "https://example.com/1.jpg"),))
+    direct_send, trace = ContentHandlerRuntime._run_merge_condition(entry, {})
+    assert direct_send is True
+    assert trace["max_chars"] == 80
+    assert trace["max_images"] == 1
+
+
+def test_merge_condition_falls_back_on_invalid_thresholds():
+    entry = _entry(content="短", media_items=(("image", "https://example.com/1.jpg"),))
+    direct_send, _ = ContentHandlerRuntime._run_merge_condition(
+        entry, {"max_chars": "not-a-number", "max_images": "x"}
+    )
+    assert direct_send is True
+
+
+@pytest.mark.asyncio
+async def test_merge_condition_in_chain_sets_direct_send():
+    runtime = _runtime(FakeProvider(""), pipeline_mode=True)
+    sub = _merge_subscription()
+    entry = _entry(
+        content="短",
+        media_items=(("image", "https://example.com/1.jpg"),),
+        media_urls=("https://example.com/1.jpg",),
+    )
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=entry,
+        session_id="session-1",
+    )
+    assert result.direct_send is True
+    names = [t["name"] for t in result.trace]
+    assert "merge_condition" in names
+
+
+@pytest.mark.asyncio
+async def test_merge_condition_absent_direct_send_none():
+    runtime = _runtime(FakeProvider(""), pipeline_mode=True)
+    sub = _comment_subscription()  # 只有 ai_comment，无 merge_condition
+    result = await runtime.process_entry_with_trace(
+        subscription=sub,
+        user=None,
+        entry=_entry(content="短"),
+        session_id="session-1",
+    )
+    assert result.direct_send is None
+

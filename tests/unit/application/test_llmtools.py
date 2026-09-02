@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from astrbot_plugin_rsshub.src.application.llmtools import (
@@ -89,7 +89,7 @@ async def test_llm_tool_list_handlers_returns_registry_schema():
 
     data = json.loads(result)
     names = {item["name"] for item in data["items"]}
-    assert names == {"ai_filter", "ai_transform", "ai_comment"}
+    assert names == {"ai_filter", "ai_transform", "ai_comment", "merge_condition"}
     ai_filter = next(item for item in data["items"] if item["name"] == "ai_filter")
     assert any(field["key"] == "input_scope" for field in ai_filter["schema"])
     ai_transform = next(
@@ -370,6 +370,8 @@ async def test_llm_tool_rss_subscribe_accepts_direct_event():
         user_id="u1",
         target_session="p:g:1",
         platform_name="aiocqhttp",
+        bot_self_id=ANY,
+        default_handlers=ANY,
     )
 
 

@@ -179,6 +179,30 @@ BUILTIN_HANDLER_REGISTRY: dict[str, HandlerMetadata] = {
             ),
         ],
     ),
+    "merge_condition": HandlerMetadata(
+        name="merge_condition",
+        title="合并转发条件",
+        description="纯本地规则判断：当条目足够简短（字符少、图片少、无视频/文件）时，不再用合并转发卡片，而是把图片+文字作为一条普通消息直接发出。",
+        default_enabled=False,
+        config_schema=[
+            HandlerConfigField(
+                key="max_chars",
+                type="int",
+                label="字符数阈值",
+                description="标题+正文总字符数不超过此值时视为短内容，满足条件则直接发送。",
+                required=False,
+                default=80,
+            ),
+            HandlerConfigField(
+                key="max_images",
+                type="int",
+                label="图片数阈值",
+                description="图片数不超过此值时视为少图；存在视频/音频/文件时始终走合并转发。",
+                required=False,
+                default=1,
+            ),
+        ],
+    ),
 }
 
 
