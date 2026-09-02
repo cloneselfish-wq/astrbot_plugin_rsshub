@@ -12,6 +12,10 @@
   - 建议在 handler 链中置于 `ai_transform` 之后，以便对最终改写后的内容做判断。
   - **订阅编辑面板图形化配置**：无需手写处理链 JSON，订阅编辑弹窗新增「合并转发条件」开关 + 字符数阈值 / 图片数阈值两个输入框，保存时由后端 reconcile 进订阅 handlers（与「Bot 评论」开关同机制，inherit 空链时快照合并用户全局链）。
 
+### Fixed
+
+- 修复 `Subscription.set_handlers` / `Subscription(handler_specs=...)` / `User.set_handlers` 等入口把 handlers 静默清空的 pre-existing bug：根因是 `dump_handlers(normalize_handlers(x))` 双重归一化，而 `normalize_handlers` 对已归一化的 `list[HandlerSpec]` 不幂等（只认 `dict`，遇到 `HandlerSpec` 实例一律跳过）。修复后 `normalize_handlers` 幂等处理 `HandlerSpec` 实例，调用点统一改为单次 `dump_handlers(x)`。
+
 ## [2.6.2] - 2026-08-28
 
 ### Added

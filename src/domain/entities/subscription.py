@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...shared.constants import INHERIT_VALUE
-from .handlers import dump_handlers, normalize_handlers
+from .handlers import dump_handlers
 
 HANDLERS_MODE_INHERIT = "inherit"
 HANDLERS_MODE_OVERRIDE = "override"
@@ -89,7 +89,7 @@ class Subscription(BaseModel):
         if isinstance(value, dict):
             payload = dict(value)
             raw_handlers = payload.get("handlers", payload.get("handler_specs"))
-            payload["handler_specs"] = dump_handlers(normalize_handlers(raw_handlers))
+            payload["handler_specs"] = dump_handlers(raw_handlers)
             handlers_mode = (
                 str(payload.get("handlers_mode", HANDLERS_MODE_INHERIT) or "")
                 .strip()
@@ -107,7 +107,7 @@ class Subscription(BaseModel):
         return dump_handlers(self.handler_specs)
 
     def set_handlers(self, value: Any) -> "Subscription":
-        self.handler_specs = dump_handlers(normalize_handlers(value))
+        self.handler_specs = dump_handlers(value)
         self.updated_at = datetime.now(timezone.utc)
         return self
 

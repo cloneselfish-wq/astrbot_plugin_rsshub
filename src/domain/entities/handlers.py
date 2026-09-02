@@ -390,21 +390,29 @@ def normalize_handlers(value: Any) -> list[HandlerSpec]:
     normalized: list[HandlerSpec] = []
     seen_ids: set[str] = set()
     for item in payload:
-        if not isinstance(item, dict):
-            continue
-        raw = dict(item)
-        name = str(raw.get("name", "") or "").strip()
-        if not name:
-            continue
-        # id 缺失时由 name 生成，避免粘贴的 handler 被静默丢弃
-        if not str(raw.get("id", "") or "").strip():
-            handler_type = (
-                str(raw.get("type", "") or "").strip().lower() or HandlerType.BUILTIN.value
-            )
-            raw["id"] = _generate_handler_id(name, handler_type, seen_ids)
-        try:
-            spec = HandlerSpec.model_validate(raw).normalized()
-        except Exception:
+        if isinstance(item, HandlerSpec):
+            # 已 normalize 过的 HandlerSpec 直接复用，保证幂等，
+            # 避免 dump_handlers(normalize_handlers(x)) 双重 normalize 静默丢 handler
+            try:
+                spec = item.normalized()
+            except Exception:
+                continue
+        elif isinstance(item, dict):
+            raw = dict(item)
+            name = str(raw.get("name", "") or "").strip()
+            if not name:
+                continue
+            # id 缺失时由 name 生成，避免粘贴的 handler 被静默丢弃
+            if not str(raw.get("id", "") or "").strip():
+                handler_type = (
+                    str(raw.get("type", "") or "").strip().lower() or HandlerType.BUILTIN.value
+                )
+                raw["id"] = _generate_handler_id(name, handler_type, seen_ids)
+            try:
+                spec = HandlerSpec.model_validate(raw).normalized()
+            except Exception:
+                continue
+        else:
             continue
         if not spec.id or not spec.name or spec.id in seen_ids:
             continue
