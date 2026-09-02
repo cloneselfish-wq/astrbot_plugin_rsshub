@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.6.2] - 2026-08-28
+
+### Added
+
+- 新增「单轮新条目数阈值」防护（`max_new_entries_per_poll`，默认 10，0 表示不限制）：当一轮轮询算出的新条目数超过阈值时，视为 RSSHub 端异常回灌历史推文（实测 8/28 11:00 因 RSSHub 缓存失效一次性推送 96 条历史推文），自动跳过本轮推送、只更新去重水位（entry_hashes 全量记入，下一轮这些条目不再判定为新）并输出 warning。修复后 RSSHub 再回灌历史只会在日志里留一条 warning，不再刷屏群消息。
+
+### Fixed
+
+- 顺手修复 `test_llmtools.py::test_llm_tool_rss_subscribe_accepts_direct_event` 的过时断言（v2.5.0 ai_comment 默认开启后 subscribe_cmd.execute 多传 bot_self_id/default_handlers，但断言未更新）。
+
 ## [2.6.1] - 2026-08-25
 
 ### Fixed

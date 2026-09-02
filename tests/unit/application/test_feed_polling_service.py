@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from astrbot_plugin_rsshub.src.application.services.feed_polling_service import (
+    FeedPollingResult,
     FeedPollingService,
 )
 from astrbot_plugin_rsshub.src.domain.entities.feed import Feed
@@ -829,6 +830,158 @@ async def test_poll_feed_bootstrap_records_history_without_dispatching():
     assert feed.entry_hashes
     assert feed.entry_hashes[0][0].startswith("sid:")
     dispatcher.dispatch_to_feed_subscribers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_feed_abnormal_burst_skips_dispatch_but_records_history():
+    """单轮新条目数超阈值时跳过推送、但把 hash 水位推上去（防 RSSHub 回灌历史）。"""
+    feed = Feed(id=1, link="https://example.com/rss.xml")
+    # 给一个旧 hash 让 old_groups 非空，避免触发 bootstrap_skipped
+    feed.entry_hashes = [["sid:oldseed"]]
+    entries = [
+        EntryParsed(
+            guid=f"g{i}",
+            title=f"T{i}",
+            link=f"https://example.com/{i}",
+            summary="s",
+        )
+        for i in range(11)
+    ]
+    feed_repo = MagicMock()
+    feed_repo.get_by_id = AsyncMock(return_value=feed)
+    feed_repo.save = AsyncMock(side_effect=lambda value: value)
+
+    fetcher = AsyncMock()
+    fetcher.fetch.return_value = _web_feed()
+    fetcher.close = AsyncMock()
+
+    parser = MagicMock()
+    parser.parse.return_value = (entries, None)
+    dispatcher = AsyncMock()
+
+    service = FeedPollingService(
+        feed_repo=feed_repo,
+        subscription_repo=MagicMock(),
+        fetcher_factory=MagicMock(return_value=fetcher),
+        parser=parser,
+        notification_dispatcher=dispatcher,
+        rss_settings=RSSSettings(
+            bootstrap_skip_history=True, max_new_entries_per_poll=10
+        ),
+    )
+
+    result = await service.poll_feed(1, notify_new_entries=True)
+
+    assert result.success is True
+    assert result.status == "abnormal_burst"
+    assert result.abnormal_burst is True
+    assert result.new_entries == 11
+    assert result.dispatched == 0
+    # 11 个新 hash 全部记入水位，下一轮不再判定为新（1 旧 + 11 新 = 12）
+    assert len(feed.entry_hashes) == 12
+    dispatcher.dispatch_to_feed_subscribers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_feed_abnormal_burst_disabled_when_threshold_zero():
+    """阈值 0 时不限制，11 条新条目正常推送。"""
+    feed = Feed(id=1, link="https://example.com/rss.xml")
+    feed.entry_hashes = [["sid:oldseed"]]
+    entries = [
+        EntryParsed(
+            guid=f"g{i}",
+            title=f"T{i}",
+            link=f"https://example.com/{i}",
+            summary="s",
+        )
+        for i in range(11)
+    ]
+    feed_repo = MagicMock()
+    feed_repo.get_by_id = AsyncMock(return_value=feed)
+    feed_repo.save = AsyncMock(side_effect=lambda value: value)
+
+    fetcher = AsyncMock()
+    fetcher.fetch.return_value = _web_feed()
+    fetcher.close = AsyncMock()
+
+    parser = MagicMock()
+    parser.parse.return_value = (entries, None)
+    dispatcher = AsyncMock()
+    dispatcher.dispatch_to_feed_subscribers.return_value = {
+        "success": 1,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+    }
+
+    service = FeedPollingService(
+        feed_repo=feed_repo,
+        subscription_repo=MagicMock(),
+        fetcher_factory=MagicMock(return_value=fetcher),
+        parser=parser,
+        notification_dispatcher=dispatcher,
+        rss_settings=RSSSettings(
+            bootstrap_skip_history=True, max_new_entries_per_poll=0
+        ),
+    )
+
+    result = await service.poll_feed(1, notify_new_entries=True)
+
+    assert result.success is True
+    assert result.abnormal_burst is False
+    assert result.dispatched == 11
+    dispatcher.dispatch_to_feed_subscribers.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_feed_abnormal_burst_not_triggered_at_threshold_boundary():
+    """新条目数等于阈值不触发（> 而非 >=），正常推送。"""
+    feed = Feed(id=1, link="https://example.com/rss.xml")
+    feed.entry_hashes = [["sid:oldseed"]]
+    entries = [
+        EntryParsed(
+            guid=f"g{i}",
+            title=f"T{i}",
+            link=f"https://example.com/{i}",
+            summary="s",
+        )
+        for i in range(10)
+    ]
+    feed_repo = MagicMock()
+    feed_repo.get_by_id = AsyncMock(return_value=feed)
+    feed_repo.save = AsyncMock(side_effect=lambda value: value)
+
+    fetcher = AsyncMock()
+    fetcher.fetch.return_value = _web_feed()
+    fetcher.close = AsyncMock()
+
+    parser = MagicMock()
+    parser.parse.return_value = (entries, None)
+    dispatcher = AsyncMock()
+    dispatcher.dispatch_to_feed_subscribers.return_value = {
+        "success": 1,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+    }
+
+    service = FeedPollingService(
+        feed_repo=feed_repo,
+        subscription_repo=MagicMock(),
+        fetcher_factory=MagicMock(return_value=fetcher),
+        parser=parser,
+        notification_dispatcher=dispatcher,
+        rss_settings=RSSSettings(
+            bootstrap_skip_history=True, max_new_entries_per_poll=10
+        ),
+    )
+
+    result = await service.poll_feed(1, notify_new_entries=True)
+
+    assert result.success is True
+    assert result.abnormal_burst is False
+    assert result.dispatched == 10
+    dispatcher.dispatch_to_feed_subscribers.assert_awaited()
 
 
 @pytest.mark.asyncio

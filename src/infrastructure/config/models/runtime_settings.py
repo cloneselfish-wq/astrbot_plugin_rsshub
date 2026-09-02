@@ -70,6 +70,7 @@ class RSSSettings:
     hash_history_hard_limit: int = 5000
     tracking_query_params: tuple[str, ...] = field(default_factory=tuple)
     bootstrap_skip_history: bool = True
+    max_new_entries_per_poll: int = 10
 
 
 @dataclass(frozen=True)

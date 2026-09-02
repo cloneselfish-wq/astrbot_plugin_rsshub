@@ -403,6 +403,9 @@ def build_application_settings(config: Any) -> ApplicationSettings:
             bootstrap_skip_history=bool(
                 _get_value(basic_cfg, "bootstrap_skip_history", True)
             ),
+            max_new_entries_per_poll=max(
+                0, int(_get_value(basic_cfg, "max_new_entries_per_poll", 10) or 10)
+            ),
         ),
         scheduler=SchedulerSettings(
             default_interval=int(_get_value(global_cfg, "interval", 10) or 10),

@@ -82,6 +82,7 @@ class FeedPollingResult:
     new_entries: int = 0
     dispatched: int = 0
     bootstrap_skipped: bool = False
+    abnormal_burst: bool = False
     feed: Feed | None = None
     error: str = ""
 
@@ -275,10 +276,31 @@ class FeedPollingService:
             and not old_groups
             and self._rss_settings.bootstrap_skip_history
         )
+        # 异常回灌防护：老 feed 一轮突然冒出大量新条目，几乎必是 RSSHub 端
+        # 返回了历史推文（缓存失效/token 切换/路由变化）。此时跳过本轮推送、
+        # 只把 hash 水位推上去（committed_groups = new_groups 全量记下），
+        # 下一轮这些条目就在 old_groups 里、不会再推。阈值 0 表示不限制。
+        max_new = self._rss_settings.max_new_entries_per_poll
+        abnormal_burst = bool(
+            notify_new_entries
+            and new_entries
+            and not bootstrap_skipped
+            and max_new > 0
+            and len(new_entries) > max_new
+        )
+        if abnormal_burst:
+            logger.warning(
+                "poll_feed: 单轮新条目数 %d 超过阈值 %d，疑似源回灌历史，"
+                "跳过本轮推送只更新去重水位: feed=%s",
+                len(new_entries),
+                max_new,
+                feed.link,
+            )
         if (
             notify_new_entries
             and new_entries
             and not bootstrap_skipped
+            and not abnormal_burst
             and self._notification_dispatcher
         ):
             dispatch_result = await self._dispatch_entries(
@@ -289,7 +311,12 @@ class FeedPollingService:
             dispatched = dispatch_result.dispatched
             acknowledged_entries = dispatch_result.acknowledged_entries
 
-        if notify_new_entries and new_entries and not bootstrap_skipped:
+        if (
+            notify_new_entries
+            and new_entries
+            and not bootstrap_skipped
+            and not abnormal_burst
+        ):
             acknowledged_ids = {id(entry) for entry in acknowledged_entries}
             unacknowledged_entries = [
                 entry for entry in new_entries if id(entry) not in acknowledged_ids
@@ -311,6 +338,8 @@ class FeedPollingService:
                     len(unacknowledged_entries),
                 )
         else:
+            # bootstrap_skipped 或 abnormal_burst：全部新条目 hash 都记入水位，
+            # 下一轮不再判定为新（bootstrap 跳过首轮、abnormal 把回灌的 historical 记下）。
             committed_groups = new_groups
 
         feed.entry_hashes = self._merge_hash_history(
@@ -324,6 +353,11 @@ class FeedPollingService:
         message = f"刷新完成 (ID: {feed_id})，发现 {len(entries)} 个条目"
         if bootstrap_skipped:
             message += f"，首次初始化跳过历史 {len(new_entries)} 个"
+        elif abnormal_burst:
+            message += (
+                f"，新增 {len(new_entries)} 个超过阈值 {max_new}，"
+                f"疑似源回灌历史跳过推送"
+            )
         elif new_entries:
             message += f"，新增 {len(new_entries)} 个"
         else:
@@ -339,7 +373,9 @@ class FeedPollingService:
         return FeedPollingResult(
             success=True,
             status=(
-                "bootstrapped"
+                "abnormal_burst"
+                if abnormal_burst
+                else "bootstrapped"
                 if bootstrap_skipped
                 else "updated"
                 if new_entries
@@ -351,6 +387,7 @@ class FeedPollingService:
             new_entries=len(new_entries),
             dispatched=dispatched,
             bootstrap_skipped=bootstrap_skipped,
+            abnormal_burst=abnormal_burst,
             feed=saved_feed,
         )
 

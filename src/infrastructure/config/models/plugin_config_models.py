@@ -51,6 +51,10 @@ class BasicConfig(BaseModel):
     failed_queue_max_retries: int = Field(default=3, description="失败队列最大重试次数")
     deduplicate_multi_bot: bool = Field(default=True, description="多BOT去重")
     bootstrap_skip_history: bool = Field(default=True, description="首轮跳过历史")
+    max_new_entries_per_poll: int = Field(
+        default=10,
+        description="单轮新条目数阈值，超过则视为源回灌历史跳过本轮推送；0 不限制",
+    )
     history_entry_limit: int = Field(default=0, description="历史条目限制")
     history_retention_days: int = Field(default=30, description="推送历史保留天数")
     download_media_before_send: bool = Field(
@@ -458,6 +462,10 @@ class RsshubPluginConfig(BaseModel):
     @property
     def bootstrap_skip_history(self) -> bool:
         return self.basic_config.bootstrap_skip_history
+
+    @property
+    def max_new_entries_per_poll(self) -> int:
+        return self.basic_config.max_new_entries_per_poll
 
     @property
     def history_entry_limit(self) -> int:

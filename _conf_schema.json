@@ -108,6 +108,17 @@
         "hint": "首次监控是否跳过历史条目",
         "default": true
       },
+      "max_new_entries_per_poll": {
+        "type": "int",
+        "description": "单轮新条目数阈值",
+        "hint": "单次轮询新条目数超过此值则视为源回灌历史，跳过本轮推送只更新去重水位（防 RSSHub 突发返回历史推文刷屏）。0 表示不限制",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        }
+      },
       "history_entry_limit": {
         "type": "int",
         "description": "历史条目推送限制",

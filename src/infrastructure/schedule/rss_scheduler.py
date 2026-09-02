@@ -347,6 +347,8 @@ class RSSScheduler:
             self._stats.empty()
         elif result.bootstrap_skipped:
             self._stats.skipped()
+        elif result.abnormal_burst:
+            self._stats.skipped()
         elif result.new_entries > 0:
             self._stats.updated()
         else:
