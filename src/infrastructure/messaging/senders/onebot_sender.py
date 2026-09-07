@@ -183,7 +183,7 @@ class OneBotMessageSender(DefaultMessageSender):
                 context.channel.title if context and context.channel.title else "RSSHub"
             )
 
-            from astrbot.api.message_components import File, Image, Record, Video
+            from astrbot.api.message_components import File, Image, Record
 
             components = self._build_components(
                 request,
@@ -199,6 +199,11 @@ class OneBotMessageSender(DefaultMessageSender):
             )
 
             nodes: list[Node] = []
+            # 摘出合并转发节点中的视频：NapCat 伪造合并转发不识别 video 节点的
+            # 文件（即便已 stream 上传到 NapCat 本机仍报“识别URL失败”），
+            # 因此视频改为在合并转发消息之外单独发送（见 _send_detached_videos），
+            # 合并转发内保留文本/图片与原文链接。
+            detached_videos = []
             for component in components:
                 node_content: list | None = None
                 if component.kind == "text":
@@ -208,7 +213,8 @@ class OneBotMessageSender(DefaultMessageSender):
                         case "image":
                             node_content = [Image(file=component.file)]
                         case "video":
-                            node_content = [Video(file=component.file)]
+                            detached_videos.append(component)
+                            continue
                 elif component.kind == "tail":
                     match component.media_type:
                         case "audio":
@@ -234,6 +240,12 @@ class OneBotMessageSender(DefaultMessageSender):
                 )
 
             if not nodes:
+                # 没有文本/图片节点但摘出了视频：直接单独发送视频即可
+                if detached_videos:
+                    video_failures = await self._send_detached_videos(
+                        session_id, detached_videos, bot_client
+                    )
+                    return self._partial_send_result(video_failures)
                 return SendResult(ok=False, detail="empty_message")
 
             # NapCat stream mode: always
@@ -242,7 +254,8 @@ class OneBotMessageSender(DefaultMessageSender):
 
             result = await self._send_chain(session_id, [Nodes(nodes)])
 
-            # NapCat stream mode: fallback
+            # NapCat stream mode: fallback（合并转发内已不再包含视频节点，此分支
+            # 实际不会触发，仅为兼容未来可能出现在节点内的可上传组件而保留）
             if (
                 not result.ok
                 and napcat_mode == "fallback"
@@ -280,8 +293,26 @@ class OneBotMessageSender(DefaultMessageSender):
                         bot_self_id,
                     )
                 ]
-                return await self._send_chain(session_id, [Nodes(fallback_nodes)])
-            return result
+                send_result = await self._send_chain(
+                    session_id, [Nodes(fallback_nodes)]
+                )
+            else:
+                send_result = result
+
+            # 合并转发消息之外，单独发送摘出的视频（与合并转发成败无关均尝试；
+            # 无法直接送达时 _send_detached_videos 会补发可点击的原始视频链接，
+            # 保证内容可达，故此处只记录降级、不视为整体失败）
+            if detached_videos:
+                video_failures = await self._send_detached_videos(
+                    session_id, detached_videos, bot_client
+                )
+                if video_failures:
+                    logger.warning(
+                        "OneBot detached video degraded: session=%s, failures=%d",
+                        session_id,
+                        len(video_failures),
+                    )
+            return send_result
 
         except Exception as err:
             logger.error(
@@ -298,6 +329,93 @@ class OneBotMessageSender(DefaultMessageSender):
         finally:
             if cleanup_owned:
                 self._cleanup_owned_paths(effective_prepared)
+
+    async def _send_detached_videos(
+        self,
+        session_id: str,
+        video_components: list,
+        bot_client: Any | None,
+    ) -> list[SendResult]:
+        """在合并转发消息之外，单独发送从合并转发节点中摘出的视频。
+
+        NapCat 的伪造合并转发不识别 video 节点内的文件——即使已通过 stream
+        上传到 NapCat 本机可访问路径，发送仍报“识别URL失败”。因此视频必须
+        拆出合并转发，作为独立单条视频消息发送。
+
+        发送策略（每个视频）：
+        1. 本地文件：优先经 NapCat stream 上传到 NapCat 可访问路径后单发；
+        2. 上传不可用/单发失败：尝试直发本地路径（兼容共享文件系统部署）；
+        3. 仍无法送达：补发一条可点击的原始视频链接文本，保证内容可达。
+
+        Args:
+            session_id: 会话 ID
+            video_components: 摘出的视频组件列表
+            bot_client: 支持 call_action 的 bot 客户端（可能为 None）
+
+        Returns:
+            发送失败记录列表（失败项已各自补发链接降级）。
+        """
+        from astrbot.api.message_components import Plain, Video
+
+        failures: list[SendResult] = []
+
+        def _http_url(value: str) -> str:
+            value = value.strip()
+            return value if value.startswith(("http://", "https://")) else ""
+
+        for component in video_components:
+            file_value = str(component.file or "").strip()
+            original_url = _http_url(str(component.original_url or ""))
+            local_path = self._extract_local_video_path(component)
+
+            if local_path is not None:
+                # 1) 有本地文件：先尝试 stream 上传到 NapCat，上传不可用时直发本地路径
+                uploaded_path = None
+                if bot_client is not None:
+                    uploaded_path = await upload_file_stream(bot_client, local_path)
+                target_file = uploaded_path or file_value
+                result = await self._send_chain(
+                    session_id,
+                    [Video(file=target_file)],
+                )
+                if result.ok:
+                    continue
+                logger.warning(
+                    "OneBot detached video send failed: session=%s, file=%s, "
+                    "detail=%s",
+                    session_id,
+                    target_file,
+                    result.detail,
+                )
+                self._merge_send_failure(failures, result, stage="send_detached_video")
+            elif _http_url(file_value):
+                # 2) 无本地文件但持有 URL（兜底场景）：直接补发可点击链接
+                link_url = original_url or file_value
+                link_result = await self._send_chain(
+                    session_id,
+                    [Plain(f"🎬 视频: {link_url}")],
+                )
+                if not link_result.ok:
+                    self._merge_send_failure(
+                        failures, link_result, stage="send_video_link"
+                    )
+                continue
+            else:
+                # 既非本地文件也非 URL：无可用发送载体
+                continue
+
+            # 3) 单发失败降级：补发可点击的原始视频链接
+            if original_url:
+                link_result = await self._send_chain(
+                    session_id,
+                    [Plain(f"🎬 视频（无法直接发送）: {original_url}")],
+                )
+                if not link_result.ok:
+                    self._merge_send_failure(
+                        failures, link_result, stage="send_video_link"
+                    )
+
+        return failures
 
     async def _stream_upload_nodes(
         self, bot_client: Any, nodes: list[Node]
