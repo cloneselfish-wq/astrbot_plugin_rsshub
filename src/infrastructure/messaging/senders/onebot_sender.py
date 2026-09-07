@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from astrbot.api.message_components import Node, Nodes, Plain
 
 from ...utils import get_logger
+from ..napcat_stream import _call_action as _call_bot_action
 from ..napcat_stream import upload_file_stream
 from .base_sender import DefaultMessageSender
 from .types import MessageContext, SendRequest, SendResult, get_bot_self_id
@@ -374,10 +375,20 @@ class OneBotMessageSender(DefaultMessageSender):
                 if bot_client is not None:
                     uploaded_path = await upload_file_stream(bot_client, local_path)
                 target_file = uploaded_path or file_value
-                result = await self._send_chain(
-                    session_id,
-                    [Video(file=target_file)],
-                )
+                # 上传成功后优先经同一条 bot 连接发送：stream 上传的文件只
+                # 存在于接收上传的那个 NapCat 容器；StarTools.send_message
+                # 按会话路由，若与上传连接不在同一容器会报"识别URL失败"
+                # （文件不存在）。失败时回退常规会话路由发送。
+                result = None
+                if uploaded_path and bot_client is not None:
+                    result = await self._send_video_via_bot(
+                        session_id, target_file, bot_client
+                    )
+                if result is None or not result.ok:
+                    result = await self._send_chain(
+                        session_id,
+                        [Video(file=target_file)],
+                    )
                 if result.ok:
                     continue
                 logger.warning(
@@ -416,6 +427,59 @@ class OneBotMessageSender(DefaultMessageSender):
                     )
 
         return failures
+
+    @staticmethod
+    def _parse_group_id(session_id: str) -> str | None:
+        """从 AstrBot 会话 ID（platform:MessageType:id）解析群号。"""
+        parts = str(session_id or "").split(":")
+        if len(parts) >= 3 and parts[-2] == "GroupMessage":
+            gid = parts[-1].strip()
+            return gid or None
+        return None
+
+    async def _send_video_via_bot(
+        self,
+        session_id: str,
+        file_path: str,
+        bot_client: Any,
+    ) -> SendResult | None:
+        """通过与 stream 上传相同的 bot 连接发送视频消息。
+
+        stream 上传把文件写到接收连接对应的 NapCat 容器本地；直接用该
+        连接调用 send_group_msg 可保证发送方与文件落在同一容器。会话
+        无法解析出群号时返回 None（交由调用方回退常规会话路由发送）。
+        """
+        group_id = self._parse_group_id(session_id)
+        if not group_id:
+            return None
+        try:
+            await _call_bot_action(
+                bot_client,
+                "send_group_msg",
+                {
+                    "group_id": int(group_id),
+                    "message": [{"type": "video", "data": {"file": file_path}}],
+                },
+            )
+            logger.info(
+                "OneBot detached video sent via upload connection: "
+                "session=%s, file=%s",
+                session_id,
+                file_path,
+            )
+            return SendResult(ok=True)
+        except Exception as ex:
+            logger.warning(
+                "OneBot video send via upload connection failed: session=%s, "
+                "detail=%s",
+                session_id,
+                ex,
+            )
+            return SendResult(
+                ok=False,
+                transient=True,
+                detail=self._stage_error_detail("send_video_via_bot", str(ex)),
+            )
 
     async def _stream_upload_nodes(
         self, bot_client: Any, nodes: list[Node]
