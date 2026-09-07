@@ -312,6 +312,7 @@ def build_application_settings(config: Any) -> ApplicationSettings:
             )
             or _DEFAULT_MEDIA_TIMEOUT_SECONDS
         ),
+        no_proxy=_as_tuple(_get_value(http_cfg, "no_proxy", None)),
     )
     basic = BasicSettings(
         proxy=http.proxy,

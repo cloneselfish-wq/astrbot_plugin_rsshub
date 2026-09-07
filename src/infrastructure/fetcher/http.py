@@ -13,6 +13,7 @@ import aiohttp
 from ...application.dto import WebFeed
 from ...domain.exceptions import WebError
 from ..utils import get_logger
+from ..utils.proxy_bypass import resolve_proxy_for_url
 
 logger = get_logger()
 
@@ -68,7 +69,9 @@ class HttpFetcher:
         """
         ret = WebFeed(url=url, ori_url=url)
         log_level = 30 if verbose else 10
-        effective_proxy = (proxy or "").strip() or self.proxy
+        effective_proxy = resolve_proxy_for_url(
+            (proxy or "").strip() or self.proxy, url
+        )
 
         _headers: dict[str, str] = {}
         if headers:

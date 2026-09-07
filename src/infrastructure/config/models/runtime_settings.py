@@ -50,6 +50,7 @@ class HttpSettings:
     proxy: str = ""
     timeout: int = 30
     media_timeout: int = _DEFAULT_MEDIA_TIMEOUT_SECONDS
+    no_proxy: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

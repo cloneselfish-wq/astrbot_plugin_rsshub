@@ -164,6 +164,12 @@
           "max": 1800,
           "step": 1
         }
+      },
+      "no_proxy": {
+        "type": "list",
+        "description": "代理直连名单（NO_PROXY）",
+        "hint": "命中名单的目标不走代理（直连）。内置默认已含 localhost、内网/私有网段、rsshub容器主机名、B站全系(*.bilibili.com/*.hdslb.com/*.bilivideo.com)；在此追加其它需直连的域名，支持通配符如 *.sinaimg.cn、*.weibo.com。留空仅使用内置默认",
+        "default": []
       }
     }
   },
@@ -257,21 +263,36 @@
         "description": "GIF 转码质量档位",
         "hint": "compatibility：长边 960px、15 FPS、128 色；balanced：1280px、20 FPS、256 色；quality：保留原尺寸、30 FPS、256 色，可能导致高分辨率视频耗尽内存",
         "default": "compatibility",
-        "options": ["compatibility", "balanced", "quality"]
+        "options": [
+          "compatibility",
+          "balanced",
+          "quality"
+        ]
       },
       "ffmpeg_source": {
         "type": "string",
         "description": "FFmpeg 来源",
         "hint": "auto=优先系统 PATH，系统缺失时自动下载捆绑 ffmpeg；system=仅使用系统 PATH，不下载",
         "default": "auto",
-        "options": ["auto", "system"]
+        "options": [
+          "auto",
+          "system"
+        ]
       },
       "ffmpeg_mirror": {
         "type": "string",
         "description": "FFmpeg 下载镜像",
         "hint": "auto=自动测速选最快镜像；国内可选手动 ghfast/ghproxy 等，国外保持 default",
         "default": "auto",
-        "options": ["auto", "default", "ghfast", "ghproxy", "mirror_ghproxy", "gh_proxy", "custom"]
+        "options": [
+          "auto",
+          "default",
+          "ghfast",
+          "ghproxy",
+          "mirror_ghproxy",
+          "gh_proxy",
+          "custom"
+        ]
       },
       "ffmpeg_mirror_custom_url": {
         "type": "string",
@@ -281,7 +302,7 @@
       }
     }
   },
-    "sender_strategies": {
+  "sender_strategies": {
     "type": "object",
     "description": "平台发送策略配置",
     "hint": "选择启用专用发送策略的平台；未选择的平台使用默认发送器。平台策略使用一个统一模板列表按需添加，模板类型可不同；同类模板当前只读取第一条。",
@@ -341,7 +362,11 @@
                 "description": "NapCat 流式上传",
                 "hint": "disabled=不用流式上传，fallback=普通发送失败后流式重试，always=发送前优先流式上传。",
                 "default": "fallback",
-                "options": ["disabled", "fallback", "always"]
+                "options": [
+                  "disabled",
+                  "fallback",
+                  "always"
+                ]
               }
             }
           },

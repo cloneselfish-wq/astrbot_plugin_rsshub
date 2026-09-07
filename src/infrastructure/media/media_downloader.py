@@ -26,6 +26,7 @@ from ..utils import get_plugin_cache_dir
 from ..utils.ffmpeg_helper import FFmpegTool
 from ..utils.logger import get_logger
 from ..utils.media_integrity import validate_media_file
+from ..utils.proxy_bypass import resolve_proxy_for_url
 from ..utils.media_type_detector import (
     MEDIA_TYPE_SUFFIXES,
     detect_media_bytes,
@@ -212,6 +213,8 @@ class MediaDownloader:
         Raises:
             RuntimeError: 所有候选URL下载失败
         """
+        # 按目标 host 精细分流：内网/国内域名直连，其余走配置代理
+        proxy = resolve_proxy_for_url(proxy, url)
         timeout = aiohttp.ClientTimeout(total=max(1, int(timeout_seconds)))
         last_err: Exception | None = None
 
@@ -592,6 +595,8 @@ class MediaDownloader:
         Raises:
             RuntimeError: 下载失败
         """
+        # 按目标 host 精细分流：内网/国内域名直连，其余走配置代理
+        proxy = resolve_proxy_for_url(proxy, url)
         cache_enabled = self._CACHE_ENABLED
         if cache_enabled:
             await self._run_periodic_cache_gc()

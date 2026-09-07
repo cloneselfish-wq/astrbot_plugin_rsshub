@@ -7,6 +7,7 @@ import hashlib
 import aiohttp
 
 from ..utils import get_logger
+from ..utils.proxy_bypass import resolve_proxy_for_url
 
 logger = get_logger()
 
@@ -46,7 +47,8 @@ class HttpMediaFingerprintService:
             return None
 
         try:
-            async with session.get(url, proxy=self._proxy or None) as resp:
+            effective_proxy = resolve_proxy_for_url(self._proxy, url)
+            async with session.get(url, proxy=effective_proxy or None) as resp:
                 if resp.status != 200:
                     return None
 

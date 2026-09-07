@@ -11,6 +11,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from ...utils import get_logger
+from ...utils.proxy_bypass import resolve_proxy_for_url
 
 logger = get_logger()
 
@@ -45,10 +46,11 @@ class FeedDiscoverer:
         """
         try:
             async with aiohttp.ClientSession() as session:
+                effective_proxy = resolve_proxy_for_url(self.proxy, page_url)
                 async with session.get(
                     page_url,
                     timeout=self.timeout,
-                    proxy=self.proxy or None,
+                    proxy=effective_proxy or None,
                     headers={
                         "Accept": "text/html,application/xhtml+xml",
                         "User-Agent": "Mozilla/5.0 (compatible; RSSHubBot/1.0)",
