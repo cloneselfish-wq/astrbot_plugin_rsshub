@@ -18,7 +18,9 @@ from ..utils import get_logger
 logger = get_logger()
 
 DEFAULT_STREAM_CHUNK_SIZE = 64 * 1024
-DEFAULT_FILE_RETENTION_MS = 30 * 1000
+# 上传完成后文件在 NapCat 本机的保留时长。发送大视频时 NapCat 侧
+# ffmpeg 取帧/上传 QQ 可能耗时 30s+，保留期过短会在发送中途删文件。
+DEFAULT_FILE_RETENTION_MS = 180 * 1000
 
 
 def _get_bot_client(event_or_client: Any) -> Any | None:
