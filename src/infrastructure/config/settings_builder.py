@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..utils.proxy_bypass import DEFAULT_NO_PROXY_PATTERNS
 from ...shared.constants import (
     MEDIA_CACHE_TTL_SECONDS_DEFAULT,
     MEDIA_CACHE_TTL_SECONDS_MIN,
@@ -312,7 +313,11 @@ def build_application_settings(config: Any) -> ApplicationSettings:
             )
             or _DEFAULT_MEDIA_TIMEOUT_SECONDS
         ),
-        no_proxy=_as_tuple(_get_value(http_cfg, "no_proxy", None)),
+        # no_proxy 为完整权威名单；缺失/留空时回退缺省清单（B站全系等直连域名）
+        no_proxy=(
+            _as_tuple(_get_value(http_cfg, "no_proxy", None))
+            or DEFAULT_NO_PROXY_PATTERNS
+        ),
     )
     basic = BasicSettings(
         proxy=http.proxy,

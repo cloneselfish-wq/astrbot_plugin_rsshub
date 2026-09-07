@@ -1,12 +1,14 @@
 """按目标 host 的精细代理分流（NO_PROXY 语义）。
 
 AstrBot 侧代理策略对齐 RSSHub 容器（rsshub-rsshub-1 的 NO_PROXY）：
-- docker 内部网络 / 私有网段 / 单标签主机名（如 rsshub-rsshub-1）→ 直连
-- 明确列出的国内域名（如 *.bilibili.com / *.hdslb.com / *.bilivideo.com）→ 直连
+- docker 内部网络 / 私有网段 / 单标签主机名（如 rsshub-rsshub-1）→ 始终强制直连（代码兜底，不可配置，避免代理劫持内网导致 502）
+- 配置项 http_config.no_proxy 中的域名 → 直连（完整权威名单，用户可在面板增删）
 - 其余目标（twitter、video.twimg.com、youtube 等）→ 走 http_config.proxy
 
-模块级名单可在插件启动时通过 configure_no_proxy() 注入用户配置，
-默认名单保证 docker 内网与常见国内域名不被代理劫持。
+名单语义：
+- DEFAULT_NO_PROXY_PATTERNS 仅为“缺省清单”（settings_builder 在配置缺失/留空时回退它），
+  不是强制名单——用户配置非空时以用户配置为准。
+- 私有网段与单标签主机名规则始终生效，与名单无关，无法通过配置关闭。
 """
 
 from __future__ import annotations
@@ -16,22 +18,18 @@ from ipaddress import ip_address, ip_network
 from typing import Iterable
 from urllib.parse import urlparse
 
-# 与 RSSHub 容器 NO_PROXY 一致的内置默认名单。
+# 缺省直连名单（settings_builder 在 http_config.no_proxy 缺失/为空时回退到它）。
+# 默认对齐 RSSHub 容器 NO_PROXY 中的国内站点部分：B 站全系 + 本地 mDNS。
+# 注意：localhost / 127.0.0.1 / 私有网段等已由下方强制规则覆盖，无需（也不应）出现在此名单。
 DEFAULT_NO_PROXY_PATTERNS: tuple[str, ...] = (
-    "localhost",
-    "127.0.0.1",
     "*.local",
-    # docker 网桥/私有网段
-    "172.*",
-    "10.*",
-    "192.168.*",
     # 国内站点（B 站全系：API / 封面图 CDN / 视频流）
     "*.bilibili.com",
     "*.hdslb.com",
     "*.bilivideo.com",
 )
 
-# 兜底私有网段（即使名单被用户误清空也强制直连，避免代理劫持内网请求）。
+# 兜底私有网段（即使配置被清空也强制直连，避免代理劫持内网请求）。
 _PRIVATE_NETWORKS: tuple[ip_network, ...] = (
     ip_network("10.0.0.0/8"),
     ip_network("172.16.0.0/12"),
@@ -44,14 +42,18 @@ _configured_patterns: tuple[str, ...] = DEFAULT_NO_PROXY_PATTERNS
 
 
 def configure_no_proxy(patterns: Iterable[str] | None) -> None:
-    """注入用户配置的 NO_PROXY 名单（覆盖内置默认，全部以小写保存）。"""
+    """注入完整的 NO_PROXY 名单（覆盖式，全部以小写保存）。
+
+    Args:
+        patterns: 权威直连名单。传入 None/空时回退 DEFAULT_NO_PROXY_PATTERNS。
+    """
     global _configured_patterns
     normalized: list[str] = []
     for pattern in patterns or ():
         pattern = str(pattern or "").strip().lower()
         if pattern and pattern not in normalized:
             normalized.append(pattern)
-    _configured_patterns = tuple(normalized)
+    _configured_patterns = tuple(normalized) or DEFAULT_NO_PROXY_PATTERNS
 
 
 def _host_from_url(url: str) -> str:

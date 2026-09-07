@@ -84,10 +84,7 @@ from .src.infrastructure.utils import (
     get_plugin_data_dir,
 )
 from .src.infrastructure.utils.media_integrity import configure_media_integrity
-from .src.infrastructure.utils.proxy_bypass import (
-    DEFAULT_NO_PROXY_PATTERNS,
-    configure_no_proxy,
-)
+from .src.infrastructure.utils.proxy_bypass import configure_no_proxy
 from .src.interfaces import WebApiHandler
 
 logger = get_logger()
@@ -357,10 +354,9 @@ async def _configure_ffmpeg_bundler(app_settings: ApplicationSettings) -> None:
 
 def _configure_message_senders(app_settings: ApplicationSettings) -> None:
     """Apply runtime config consumed by concrete message senders."""
-    # 精细代理分流名单：内置默认（内网/B站直连）+ 用户 http_config.no_proxy 追加
-    configure_no_proxy(
-        (*DEFAULT_NO_PROXY_PATTERNS, *app_settings.http.no_proxy)
-    )
+    # 精细代理分流名单：来自 http_config.no_proxy（完整权威名单，
+    # settings_builder 已在缺失/留空时回退缺省清单 B站全系等直连域名）
+    configure_no_proxy(app_settings.http.no_proxy)
     DefaultMessageSender.configure_runtime(
         timeout_seconds=app_settings.http.media_timeout,
         proxy=app_settings.http.proxy,

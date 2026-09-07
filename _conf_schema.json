@@ -168,8 +168,13 @@
       "no_proxy": {
         "type": "list",
         "description": "代理直连名单（NO_PROXY）",
-        "hint": "命中名单的目标不走代理（直连）。内置默认已含 localhost、内网/私有网段、rsshub容器主机名、B站全系(*.bilibili.com/*.hdslb.com/*.bilivideo.com)；在此追加其它需直连的域名，支持通配符如 *.sinaimg.cn、*.weibo.com。留空仅使用内置默认",
-        "default": []
+        "hint": "命中名单的请求不走代理（直连），支持通配符（*.x 同时覆盖裸域 x）。本项是完整权威名单，默认已含 B站全系(*.bilibili.com/*.hdslb.com/*.bilivideo.com)与本地 mDNS(*.local)；按需增删其它直连域名，例如 *.sinaimg.cn、*.weibo.com。注意：docker 内网/私有网段与单标签主机名(如 rsshub容器)始终强制直连，不受本项影响；列表清空将自动回退内置默认",
+        "default": [
+          "*.local",
+          "*.bilibili.com",
+          "*.hdslb.com",
+          "*.bilivideo.com"
+        ]
       }
     }
   },
