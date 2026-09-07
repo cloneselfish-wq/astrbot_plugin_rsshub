@@ -247,40 +247,108 @@ def _register_bot_client_provider(context: Context) -> None:
     这里通过 AstrBot platform_manager 按平台名解析出底层 bot 客户端
     （如 aiocqhttp 的 CQHttp 实例），用于调用 NapCat stream action，
     并从中解析出 bot 的 self_id（QQ 号）供合并转发节点使用。
+
+    注意：PlatformMetadata.name 是适配器类型（如 aiocqhttp）而非实例
+    标识；同类型可有多个实例（多个 NapCat 反向 WS，各连一个容器）。
+    仅按 name 匹配会永远命中第一个实例——导致 stream 上传与按会话
+    路由的消息发送落在不同 NapCat 容器（表现为 retcode=1200
+    「识别URL失败」）。因此支持按 instance_id / self_id 精确路由。
     """
 
-    def _resolve_bot_client(platform_name: str) -> object | None:
-        if not platform_name:
+    def _inst_id(inst) -> str:
+        meta = inst.meta() if hasattr(inst, "meta") else None
+        return str(getattr(meta, "id", "") or "")
+
+    def _inst_name(inst) -> str:
+        meta = inst.meta() if hasattr(inst, "meta") else None
+        return str(
+            getattr(meta, "name", None)
+            or getattr(inst, "platform_name", None)
+            or ""
+        )
+
+    def _resolve_bot_client(
+        platform_name: str,
+        *,
+        instance_id: str | None = None,
+        self_id: str | None = None,
+    ) -> object | None:
+        """解析 bot 客户端。
+
+        路由优先级：
+        1. instance_id（会话 ID 前缀，即平台实例 id）精确定位实例；
+        2. self_id（bot QQ 号）按实例已连接的 _wsr_api_clients 匹配；
+        3. 同类型实例唯一则直接用；多个则取第一个并告警。
+        """
+        if not platform_name and not instance_id:
             return None
         try:
             platform_manager = getattr(context, "platform_manager", None)
             if platform_manager is None:
                 return None
-            for inst in platform_manager.get_insts():
-                meta = inst.meta() if hasattr(inst, "meta") else None
-                inst_name = getattr(meta, "name", None) or getattr(
-                    inst, "platform_name", None
+            insts = [
+                inst
+                for inst in platform_manager.get_insts()
+                if hasattr(inst, "get_client")
+            ]
+            if not insts:
+                return None
+
+            # 1) 实例 ID 精确匹配
+            if instance_id:
+                for inst in insts:
+                    if (
+                        _inst_id(inst) == instance_id
+                        or _inst_name(inst) == instance_id
+                    ):
+                        return inst.get_client()
+
+            # 2) 平台类型筛选
+            matched = [i for i in insts if _inst_name(i) == platform_name]
+            if not matched:
+                matched = insts
+
+            # 3) self_id 匹配（bot QQ 号 → 已连接的 WS 客户端）
+            if self_id:
+                for inst in matched:
+                    client = inst.get_client()
+                    api_clients = getattr(client, "_wsr_api_clients", None)
+                    if isinstance(api_clients, dict) and str(self_id) in {
+                        str(k) for k in api_clients
+                    }:
+                        return client
+
+            if len(matched) == 1:
+                return matched[0].get_client()
+            if matched:
+                logger.warning(
+                    "多个同类型平台实例，退回第一实例解析 bot client: "
+                    "platform=%s, ids=%s",
+                    platform_name,
+                    [_inst_id(i) for i in matched],
                 )
-                if inst_name == platform_name and hasattr(inst, "get_client"):
-                    return inst.get_client()
+                return matched[0].get_client()
+            return None
         except Exception as exc:
             logger.debug(
                 "解析 bot client 失败: platform=%s, err=%s", platform_name, exc
             )
         return None
 
-    def _resolve_bot_self_id(platform_name: str) -> str:
-        """解析平台上唯一的 bot self_id（QQ 号）。
+    def _resolve_bot_self_id(
+        platform_name: str,
+        *,
+        instance_id: str | None = None,
+    ) -> str:
+        """解析 bot self_id（QQ 号）。
 
-        多 bot 同平台时（例如多个 aiocqhttp 适配器实例，或单个实例下多条
-        反向 WebSocket 连接），无法确定某次推送会由哪个 bot 实际发出，
-        此时必须返回空串：调用方据此退回纯文本/图片组件发送，避免合并
-        转发节点携带错误的 uin 导致消息显示为从其他 bot "伪造转发"。
-
-        实现上汇总平台上**所有**实例的所有非零 self_id，只有恰好一个
-        时才返回；否则返回空串。
+        instance_id 给定时仅在该实例内解析（同实例多连接时仍需唯一）；
+        未给定时汇总同平台所有实例的所有非零 self_id，只有恰好一个
+        时才返回；否则返回空串，调用方据此退回纯文本/图片组件发送，
+        避免合并转发节点携带错误的 uin 导致消息显示为从其他 bot
+        "伪造转发"。
         """
-        if not platform_name:
+        if not platform_name and not instance_id:
             return ""
         try:
             platform_manager = getattr(context, "platform_manager", None)
@@ -288,11 +356,15 @@ def _register_bot_client_provider(context: Context) -> None:
                 return ""
             candidates: list[str] = []
             for inst in platform_manager.get_insts():
-                meta = inst.meta() if hasattr(inst, "meta") else None
-                inst_name = getattr(meta, "name", None) or getattr(
-                    inst, "platform_name", None
-                )
-                if inst_name != platform_name or not hasattr(inst, "get_client"):
+                if not hasattr(inst, "get_client"):
+                    continue
+                if instance_id:
+                    if (
+                        _inst_id(inst) != instance_id
+                        and _inst_name(inst) != instance_id
+                    ):
+                        continue
+                elif _inst_name(inst) != platform_name:
                     continue
                 client = inst.get_client()
                 api_clients = getattr(client, "_wsr_api_clients", None)
@@ -302,14 +374,17 @@ def _register_bot_client_provider(context: Context) -> None:
                     sid = str(self_id or "").strip()
                     if sid not in {"", "0"} and sid not in candidates:
                         candidates.append(sid)
+                if instance_id and candidates:
+                    break
             if len(candidates) == 1:
                 return candidates[0]
             if len(candidates) > 1:
                 logger.warning(
                     "无法唯一解析 bot self_id（多 bot 同平台），"
                     "退回纯文本/图片发送避免伪造转发: "
-                    "platform=%s, candidates=%s",
+                    "platform=%s, instance_id=%s, candidates=%s",
                     platform_name,
+                    instance_id,
                     candidates,
                 )
             return ""

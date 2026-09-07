@@ -197,10 +197,22 @@ def set_bot_self_id_provider(provider: Callable[[str], str] | None) -> None:
     _bot_self_id_provider = provider
 
 
-def get_bot_self_id(platform_id: str) -> str:
-    """获取指定平台的 bot_self_id"""
+def get_bot_self_id(
+    platform_id: str, *, instance_id: str | None = None
+) -> str:
+    """获取指定平台的 bot_self_id
+
+    Args:
+        platform_id: 平台名称（适配器类型，如 aiocqhttp）
+        instance_id: 平台实例唯一标识（会话 ID 前缀）。多实例同类型时
+            仅在该实例内解析，避免跨实例误判。
+    """
     if _bot_self_id_provider:
-        return _bot_self_id_provider(platform_id)
+        try:
+            return _bot_self_id_provider(platform_id, instance_id=instance_id)
+        except TypeError:
+            # 旧版 provider 仅接受 platform_id
+            return _bot_self_id_provider(platform_id)
     return ""
 
 
@@ -219,15 +231,31 @@ def set_bot_client_provider(provider: Callable[[str], Any] | None) -> None:
     _bot_client_provider = provider
 
 
-def get_bot_client(platform_name: str) -> Any | None:
+def get_bot_client(
+    platform_name: str,
+    *,
+    instance_id: str | None = None,
+    self_id: str | None = None,
+) -> Any | None:
     """获取指定平台的 bot 客户端
 
     Args:
-        platform_name: 平台名称（如 aiocqhttp）
+        platform_name: 平台名称（适配器类型，如 aiocqhttp）
+        instance_id: 平台实例唯一标识（AstrBot 会话 ID 前缀，即 umo
+            的第一段）。同类型多实例（多个 NapCat 反向 WS）时用于
+            精确定位实例，避免上传与发送落在不同容器。
+        self_id: bot QQ 号。未提供 instance_id 时按各实例已连接的
+            _wsr_api_clients 匹配。
 
     Returns:
         bot 客户端实例，若无法解析则返回 None
     """
     if _bot_client_provider:
-        return _bot_client_provider(platform_name)
+        try:
+            return _bot_client_provider(
+                platform_name, instance_id=instance_id, self_id=self_id
+            )
+        except TypeError:
+            # 旧版 provider 仅接受 platform_name
+            return _bot_client_provider(platform_name)
     return None

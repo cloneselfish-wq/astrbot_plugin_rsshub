@@ -65,12 +65,28 @@ class OneBotMessageSender(DefaultMessageSender):
             )
         )
 
+    @staticmethod
+    def _session_instance_id(session_id: str | None) -> str | None:
+        """从 AstrBot 会话 ID（platform:MessageType:id）取平台实例前缀。
+
+        会话 ID 首段即平台实例唯一标识（ umo 的第一段，如「独角兽」），
+        同类型多平台实例（多个 NapCat 反向 WS）时用于精确定位实例，
+        保证 stream 上传与消息发送落在同一容器。
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        head = sid.split(":", 1)[0].strip()
+        return head or None
+
     @classmethod
-    def _resolve_bot_client(cls, context: MessageContext | None) -> Any | None:
+    def _resolve_bot_client(
+        cls, context: MessageContext | None, session_id: str | None = None
+    ) -> Any | None:
         """解析可用于 NapCat stream 的 bot 客户端
 
         优先使用消息事件携带的 bot（命令响应场景），
-        否则通过全局 provider 按平台名解析（主动推送场景）。
+        否则通过全局 provider 按平台名 + 会话实例前缀解析（主动推送场景）。
         """
         event = getattr(context, "event", None) if context else None
         if event is not None:
@@ -81,16 +97,26 @@ class OneBotMessageSender(DefaultMessageSender):
         from .types import get_bot_client
 
         platform_name = getattr(context, "platform_name", "") if context else ""
-        return get_bot_client(platform_name or "")
+        stored_self_id = str(
+            (getattr(context, "bot_self_id", "") or "") if context else ""
+        ).strip()
+        return get_bot_client(
+            platform_name or "",
+            instance_id=cls._session_instance_id(session_id),
+            self_id=stored_self_id or None,
+        )
 
     @classmethod
-    def _resolve_bot_self_id(cls, context: MessageContext | None) -> str:
+    def _resolve_bot_self_id(
+        cls, context: MessageContext | None, session_id: str | None = None
+    ) -> str:
         """解析 bot 的 self_id（QQ 号），用于合并转发节点的 user_id。
 
         解析顺序：
         1. 命令响应场景：从事件消息对象的 ``self_id`` 读取（最可靠）。
-        2. 主动推送场景：通过全局 provider 按 platform_name 解析（由
-           bootstrap 注册，读取 CQHttp 的 ``_wsr_api_clients``）。
+        2. 主动推送场景：通过全局 provider 按 platform_name + 会话实例
+           前缀解析（由 bootstrap 注册，读取 CQHttp 的
+           ``_wsr_api_clients``）。
         3. 无法确认时返回空串。调用方保留 AstrBot SDK 的默认 ``uin="0"``，
            由兼容该缺省值的 OneBot 实现自行处理，避免伪造其他 QQ 号。
         """
@@ -109,7 +135,10 @@ class OneBotMessageSender(DefaultMessageSender):
                 return str(stored)
             platform_name = getattr(context, "platform_name", "") or ""
             if platform_name:
-                self_id = get_bot_self_id(platform_name)
+                self_id = get_bot_self_id(
+                    platform_name,
+                    instance_id=cls._session_instance_id(session_id),
+                )
                 if self_id and str(self_id) != "0":
                     return str(self_id)
         return ""
@@ -171,8 +200,8 @@ class OneBotMessageSender(DefaultMessageSender):
                     platform="onebot",
                 )
 
-            bot_client = self._resolve_bot_client(context)
-            bot_self_id = self._resolve_bot_self_id(context)
+            bot_client = self._resolve_bot_client(context, session_id=session_id)
+            bot_self_id = self._resolve_bot_self_id(context, session_id=session_id)
 
             # 多 bot 同平台时无法唯一确定发送 bot 的 self_id，
             # 此时退回到基类的纯文本/图片组件发送，避免合并转发节点
