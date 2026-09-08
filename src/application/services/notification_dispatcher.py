@@ -714,9 +714,6 @@ class NotificationDispatcher:
                 media_urls=media_urls,
                 media_items=media_items,
             )
-            normalized_media = await self._augment_bilibili_videos(
-                normalized_media, raw_entry, feed_id
-            )
             persisted_media_urls = [url for _media_type, url in normalized_media]
 
             # 2. 为每个订阅解析最终 payload；handler skip 在此阶段直接落审计记录。
@@ -830,11 +827,15 @@ class NotificationDispatcher:
                         stats["skipped"] += 1
                         continue
                     effective_send_mode = self._resolve_send_mode(sub, user)
-                    # 媒体必须用 augment 后的 normalized_media（含 B站视频等
-                    # 运行时增强项），原始 media_items 不含这些增强媒体。
-                    # normalize_media_items 按 URL 去重，重复合并无副作用。
                     effective_media_urls = media_urls
-                    effective_media_items = normalized_media
+                    # B站视频增强按订阅（群）粒度执行：冷却键为 (BV号, 目标会话)，
+                    # 同一视频在 A 群冷却不影响 B 群首次推送。
+                    effective_media_items = await self._augment_bilibili_videos(
+                        normalized_media,
+                        raw_entry,
+                        feed_id,
+                        target_session=str(sub.target_session or ""),
+                    )
                     effective_layout = (
                         list(processed_entry.layout)
                         if processed_entry is not None and processed_entry.layout
@@ -1641,15 +1642,16 @@ class NotificationDispatcher:
         normalized_media: list[tuple[str, str]],
         raw_entry: Any | None,
         feed_id: int,
+        target_session: str = "",
     ) -> list[tuple[str, str]]:
         """B站视频增强（bilibili_rss 分支定制）。
 
         检测条目文本中的 BV 号，经冷却检查后解析为 MP4 直链，
         以 video 媒体项追加进推送；下载/转码/单发复用现有链路。
 
-        冷却规则：相同 BV 号在 bilibili.dedup_hours 小时内不重复推送；
-        dedup_hours=0 表示永不再推送。仅解析成功且确认推送时写冷却表，
-        解析失败下次轮询会重试。
+        冷却规则：相同 (BV号, 目标会话) 在 bilibili.dedup_hours 小时内
+        不重复推送（冷却按群独立）；dedup_hours=0 表示永不再推送。
+        仅解析成功且确认推送时写冷却表，解析失败下次轮询会重试。
         """
         if (
             self._bilibili_settings is None
@@ -1691,7 +1693,9 @@ class NotificationDispatcher:
         result = list(normalized_media)
         for bv in bv_ids:
             try:
-                last_pushed = await self._bilibili_store.get_last_pushed_at(bv)
+                last_pushed = await self._bilibili_store.get_last_pushed_at(
+                    bv, target_session
+                )
             except Exception as exc:
                 logger.warning(
                     "[bilibili] 冷却查询失败（视为未推送）: bv=%s, err=%r", bv, exc
@@ -1733,16 +1737,23 @@ class NotificationDispatcher:
             result.append(("video", resolved.video_url))
             try:
                 await self._bilibili_store.record_pushed(
-                    bv, feed_id=feed_id, title=resolved.title
+                    bv,
+                    feed_id=feed_id,
+                    title=resolved.title,
+                    target_session=target_session,
                 )
             except Exception as exc:
                 logger.warning(
-                    "[bilibili] 冷却记录写入失败: bv=%s, err=%r", bv, exc
+                    "[bilibili] 冷却记录写入失败: bv=%s, session=%s, err=%r",
+                    bv,
+                    target_session,
+                    exc,
                 )
             logger.info(
-                "[bilibili] 视频已解析并入推送: bv=%s, quality=%sP, "
+                "[bilibili] 视频已解析并入推送: bv=%s, session=%s, quality=%sP, "
                 "size=%.1fMB, duration=%ss",
                 bv,
+                target_session,
                 resolved.quality,
                 resolved.size_bytes / 1024 / 1024,
                 resolved.duration_seconds,

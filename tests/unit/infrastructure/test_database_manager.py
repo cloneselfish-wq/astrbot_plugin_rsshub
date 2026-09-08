@@ -413,6 +413,7 @@ async def test_migration_runner_only_discovers_current_baseline_migration():
     assert [(item.version, item.name) for item in runner.scripts] == [
         (1, "V1_init"),
         (2, "V2_drop_link_preview"),
+        (3, "V3_bilibili_seen_per_session"),
     ]
 
 
@@ -422,7 +423,7 @@ async def test_v1_current_baseline_has_expected_core_columns_and_index():
     async with engine.begin() as conn:
         executed = await MigrationRunner().run_all(conn)
 
-        assert executed == [1, 2]
+        assert executed == [1, 2, 3]
 
         sub_columns = {
             str(row[1])

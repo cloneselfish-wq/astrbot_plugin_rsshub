@@ -255,13 +255,20 @@ class MigrationRecordORM(RSSHubBaseModel, table=True):
 class BilibiliVideoSeenORM(RSSHubBaseModel, table=True):
     """B站视频推送冷却记录（bilibili_rss 分支定制）。
 
-    以 BV 号为主键记录最近一次成功推送的时间戳，用于实现
+    以 (BV号, 目标会话) 为组合主键记录最近一次成功推送的时间戳，用于实现
     同一视频的推送冷却（24h/48h/永久，由 bilibili.dedup_hours 配置）。
+    冷却是推送维度且按群独立：同一视频在 A 群冷却不影响 B 群首次推送。
     """
 
     __tablename__ = "rsshub_bilibili_video_seen"
 
     bv_id: str = Field(primary_key=True, max_length=32, description="B站视频 BV 号")
+    target_session: str = Field(
+        primary_key=True,
+        max_length=128,
+        default="",
+        description="推送目标会话（如 刻晴:GroupMessage:123），冷却按群独立",
+    )
     feed_id: int = Field(default=0, description="首次推送来源 Feed ID")
     title: str = Field(default="", max_length=512, description="视频标题")
     last_pushed_at: float = Field(default=0.0, description="最近推送时间戳（epoch 秒）")
