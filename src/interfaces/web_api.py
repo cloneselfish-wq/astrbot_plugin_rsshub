@@ -1360,6 +1360,8 @@ class WebApiHandler:
             user_id=user_id,
             target_session=target_session,
             platform_name=platform_name,
+            start=max(1, int((data or {}).get("start", 1) or 1)),
+            end=max(1, int((data or {}).get("end", 1) or 1)),
         )
         if result.success:
             payload = {"ok": True, "message": result.message}
