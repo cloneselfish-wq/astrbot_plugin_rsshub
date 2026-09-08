@@ -330,8 +330,8 @@ class OneBotMessageSender(DefaultMessageSender):
                 send_result = result
 
             # 合并转发消息之外，单独发送摘出的视频（与合并转发成败无关均尝试；
-            # 无法直接送达时 _send_detached_videos 会补发可点击的原始视频链接，
-            # 保证内容可达，故此处只记录降级、不视为整体失败）
+            # 无法直接送达时 _send_detached_videos 静默跳过并记日志，
+            # 不补发链接，故此处只记录降级、不视为整体失败）
             if detached_videos:
                 video_failures = await self._send_detached_videos(
                     session_id, detached_videos, bot_client
@@ -375,7 +375,7 @@ class OneBotMessageSender(DefaultMessageSender):
         发送策略（每个视频）：
         1. 本地文件：优先经 NapCat stream 上传到 NapCat 可访问路径后单发；
         2. 上传不可用/单发失败：尝试直发本地路径（兼容共享文件系统部署）；
-        3. 仍无法送达：补发一条可点击的原始视频链接文本，保证内容可达。
+        3. 仍无法送达：静默跳过（仅记录日志，不再补发视频链接）。
 
         Args:
             session_id: 会话 ID
@@ -383,7 +383,7 @@ class OneBotMessageSender(DefaultMessageSender):
             bot_client: 支持 call_action 的 bot 客户端（可能为 None）
 
         Returns:
-            发送失败记录列表（失败项已各自补发链接降级）。
+            发送失败记录列表（失败项静默跳过，不补发链接）。
         """
         from astrbot.api.message_components import Plain, Video
 
@@ -428,6 +428,8 @@ class OneBotMessageSender(DefaultMessageSender):
                     result.detail,
                 )
                 self._merge_send_failure(failures, result, stage="send_detached_video")
+                # 发送失败即静默跳过：不再补发视频链接（避免长链接刷屏）
+                continue
             elif _http_url(file_value):
                 # 2) 无本地文件但持有 URL（兜底场景）：直接补发可点击链接
                 link_url = original_url or file_value
@@ -443,17 +445,6 @@ class OneBotMessageSender(DefaultMessageSender):
             else:
                 # 既非本地文件也非 URL：无可用发送载体
                 continue
-
-            # 3) 单发失败降级：补发可点击的原始视频链接
-            if original_url:
-                link_result = await self._send_chain(
-                    session_id,
-                    [Plain(f"🎬 视频（无法直接发送）: {original_url}")],
-                )
-                if not link_result.ok:
-                    self._merge_send_failure(
-                        failures, link_result, stage="send_video_link"
-                    )
 
         return failures
 
