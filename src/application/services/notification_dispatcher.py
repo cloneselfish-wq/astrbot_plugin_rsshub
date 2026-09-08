@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -26,6 +27,7 @@ from ...domain.repositories.push_history_repository import PushHistoryRepository
 from ...domain.repositories.subscription_repository import SubscriptionRepository
 from ...domain.repositories.user_repository import UserRepository
 from ...infrastructure.config import BasicSettings, SubscriptionDefaults
+from ...infrastructure.config.models.runtime_settings import BilibiliSettings
 from ...infrastructure.pipeline import (
     EffectivePushOptions,
     EntryFormatInput,
@@ -264,6 +266,7 @@ class NotificationDispatcher:
         subscription_defaults: SubscriptionDefaults | None = None,
         basic_settings: BasicSettings | None = None,
         pipeline_router: PipelineCommentRouter | None = None,
+        bilibili_settings: BilibiliSettings | None = None,
     ):
         self._subscription_repo = subscription_repo
         self._user_repo = user_repo
@@ -283,6 +286,27 @@ class NotificationDispatcher:
             subscription_defaults or SubscriptionDefaults()
         )
         self._basic_settings = basic_settings or BasicSettings()
+        # B站视频增强（bilibili_rss 分支定制）：未注入或未启用时全部跳过
+        self._bilibili_settings = bilibili_settings
+        if (
+            self._bilibili_settings is not None
+            and self._bilibili_settings.video_enabled
+        ):
+            from ...infrastructure.media.bilibili_video import BilibiliVideoResolver
+            from ...infrastructure.persistence.bilibili_video_repository_impl import (
+                BilibiliVideoStore,
+            )
+
+            self._bilibili_store = BilibiliVideoStore()
+            self._bilibili_resolver = BilibiliVideoResolver(
+                cookie=self._bilibili_settings.cookie,
+                qn=self._bilibili_settings.qn,
+                timeout_seconds=self._basic_settings.timeout or 20,
+                proxy=self._basic_settings.proxy or "",
+            )
+        else:
+            self._bilibili_store = None
+            self._bilibili_resolver = None
 
     @staticmethod
     def _target_from_subscription(subscription) -> SendTarget:
@@ -689,6 +713,9 @@ class NotificationDispatcher:
             normalized_media = normalize_media_items(
                 media_urls=media_urls,
                 media_items=media_items,
+            )
+            normalized_media = await self._augment_bilibili_videos(
+                normalized_media, raw_entry, feed_id
             )
             persisted_media_urls = [url for _media_type, url in normalized_media]
 
@@ -1605,6 +1632,113 @@ class NotificationDispatcher:
             ),
             options,
         )
+
+    async def _augment_bilibili_videos(
+        self,
+        normalized_media: list[tuple[str, str]],
+        raw_entry: Any | None,
+        feed_id: int,
+    ) -> list[tuple[str, str]]:
+        """B站视频增强（bilibili_rss 分支定制）。
+
+        检测条目文本中的 BV 号，经冷却检查后解析为 MP4 直链，
+        以 video 媒体项追加进推送；下载/转码/单发复用现有链路。
+
+        冷却规则：相同 BV 号在 bilibili.dedup_hours 小时内不重复推送；
+        dedup_hours=0 表示永不再推送。仅解析成功且确认推送时写冷却表，
+        解析失败下次轮询会重试。
+        """
+        if (
+            self._bilibili_settings is None
+            or self._bilibili_store is None
+            or self._bilibili_resolver is None
+        ):
+            return normalized_media
+        if raw_entry is None:
+            return normalized_media
+
+        text = "\n".join(
+            part
+            for part in (
+                getattr(raw_entry, "title", ""),
+                getattr(raw_entry, "summary", ""),
+                getattr(raw_entry, "content", ""),
+                getattr(raw_entry, "link", ""),
+            )
+            if part
+        )
+        if "BV" not in text:
+            return normalized_media
+
+        from ...infrastructure.media.bilibili_video import extract_bv_ids
+
+        bv_ids = extract_bv_ids(text)
+        if not bv_ids:
+            return normalized_media
+
+        limit = int(self._bilibili_settings.max_videos_per_entry or 3)
+        bv_ids = bv_ids[:limit]
+        window_seconds = float(self._bilibili_settings.dedup_hours) * 3600.0
+        result = list(normalized_media)
+        for bv in bv_ids:
+            try:
+                last_pushed = await self._bilibili_store.get_last_pushed_at(bv)
+            except Exception as exc:
+                logger.warning(
+                    "[bilibili] 冷却查询失败（视为未推送）: bv=%s, err=%r", bv, exc
+                )
+                last_pushed = None
+            if last_pushed is not None:
+                if window_seconds <= 0:
+                    logger.info(
+                        "[bilibili] 视频处于永久冷却，跳过解析推送: bv=%s", bv
+                    )
+                    continue
+                elapsed = time.time() - float(last_pushed)
+                if elapsed < window_seconds:
+                    logger.info(
+                        "[bilibili] 视频处于冷却期（剩余 %.1f 小时），跳过推送: bv=%s",
+                        max(0.0, window_seconds - elapsed) / 3600.0,
+                        bv,
+                    )
+                    continue
+
+            resolved = await self._bilibili_resolver.resolve(bv)
+            if resolved is None:
+                continue
+            from ...infrastructure.media.media_downloader import MediaDownloader
+
+            download_limit = MediaDownloader._MAX_DOWNLOAD_BYTES
+            if download_limit and 0 < resolved.size_bytes > download_limit:
+                logger.info(
+                    "[bilibili] 视频超出大小限额，跳过下载推送: bv=%s, "
+                    "size=%.1fMB, limit=%.0fMB",
+                    bv,
+                    resolved.size_bytes / 1024 / 1024,
+                    download_limit / 1024 / 1024,
+                )
+                continue
+
+            if any(url == resolved.video_url for _t, url in result):
+                continue
+            result.append(("video", resolved.video_url))
+            try:
+                await self._bilibili_store.record_pushed(
+                    bv, feed_id=feed_id, title=resolved.title
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[bilibili] 冷却记录写入失败: bv=%s, err=%r", bv, exc
+                )
+            logger.info(
+                "[bilibili] 视频已解析并入推送: bv=%s, quality=%sP, "
+                "size=%.1fMB, duration=%ss",
+                bv,
+                resolved.quality,
+                resolved.size_bytes / 1024 / 1024,
+                resolved.duration_seconds,
+            )
+        return result
 
     async def dispatch_pending_retries(self, limit: int = 100) -> dict[str, int]:
         """

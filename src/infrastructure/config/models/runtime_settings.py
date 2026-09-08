@@ -212,3 +212,20 @@ class ApplicationSettings:
     route_knowledge: RouteKnowledgeSettings = field(
         default_factory=RouteKnowledgeSettings
     )
+    bilibili: "BilibiliSettings" = field(default_factory=lambda: BilibiliSettings())
+
+
+@dataclass(frozen=True)
+class BilibiliSettings:
+    """B站视频增强设置（bilibili_rss 分支定制）。"""
+
+    # 是否把 feed 中的 BV 号解析为视频并推送
+    video_enabled: bool = True
+    # 同一 BV 号推送冷却小时数；0 = 永不再推送
+    dedup_hours: int = 24
+    # B站 Cookie（至少含 SESSDATA），提升清晰度；留空为未登录 360P
+    cookie: str = ""
+    # 期望清晰度 qn（16=360P 32=480P 64=720P 80=1080P），受 Cookie 权限限制
+    qn: int = 32
+    # 单条推送最多解析的视频数，防止超长合集刷屏
+    max_videos_per_entry: int = 3

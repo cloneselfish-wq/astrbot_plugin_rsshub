@@ -560,5 +560,57 @@
         "default": true
       }
     }
+  },
+  "bilibili": {
+    "type": "object",
+    "description": "B站视频增强（bilibili_rss 分支定制）",
+    "hint": "把 feed 中的 B站视频链接解析为视频推送到群",
+    "items": {
+      "video_enabled": {
+        "type": "bool",
+        "description": "启用 B站视频解析推送",
+        "hint": "检测 feed 条目中的 BV 号，解析出 MP4 后走视频单发链路",
+        "default": true
+      },
+      "dedup_hours": {
+        "type": "int",
+        "description": "同一视频推送冷却（小时）",
+        "hint": "相同 BV 号在该时长内不重复下载推送；0 表示永不再推送",
+        "default": 24,
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 1
+        }
+      },
+      "cookie": {
+        "type": "string",
+        "description": "B站 Cookie（SESSDATA）",
+        "hint": "提升视频清晰度（720P/1080P）；留空则未登录 360P",
+        "default": ""
+      },
+      "qn": {
+        "type": "int",
+        "description": "期望清晰度 qn",
+        "hint": "16=360P 32=480P 64=720P 80=1080P；实际清晰度受 Cookie 权限限制",
+        "default": 32,
+        "slider": {
+          "min": 16,
+          "max": 80,
+          "step": 16
+        }
+      },
+      "max_videos_per_entry": {
+        "type": "int",
+        "description": "单条推送最多解析视频数",
+        "hint": "防止超长合集/多视频条目刷屏",
+        "default": 3,
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        }
+      }
+    }
   }
 }

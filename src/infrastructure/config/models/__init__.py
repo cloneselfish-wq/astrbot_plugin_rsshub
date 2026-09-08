@@ -14,6 +14,7 @@ from .plugin_config_models import (
 from .runtime_settings import (
     ApplicationSettings,
     BasicSettings,
+    BilibiliSettings,
     ContentHandlerSettings,
     FeedFetchSettings,
     HttpSettings,
@@ -35,6 +36,7 @@ __all__ = [
     "ApplicationSettings",
     "BasicConfig",
     "BasicSettings",
+    "BilibiliSettings",
     "ContentHandlersConfig",
     "ContentHandlerSettings",
     "FeedFetchSettings",

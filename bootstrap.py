@@ -520,6 +520,7 @@ async def _build_dependencies(
         ),
         subscription_defaults=app_settings.subscription_defaults,
         basic_settings=app_settings.basic,
+        bilibili_settings=app_settings.bilibili,
     )
     polling_service = FeedPollingService(
         feed_repo=feed_repo,

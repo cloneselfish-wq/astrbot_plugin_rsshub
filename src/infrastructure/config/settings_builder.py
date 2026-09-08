@@ -26,6 +26,7 @@ from ...shared.constants import (
 from .models import (
     ApplicationSettings,
     BasicSettings,
+    BilibiliSettings,
     ContentHandlerSettings,
     FeedFetchSettings,
     HttpSettings,
@@ -285,6 +286,7 @@ def build_application_settings(config: Any) -> ApplicationSettings:
     http_cfg = _get_value(config, "http_config")
     global_cfg = _get_value(config, "global_config")
     media_cfg = _get_value(config, "media")
+    bilibili_cfg = _get_value(config, "bilibili")
     content_handlers_cfg = _get_value(config, "content_handlers")
     sender_cfg = _get_value(config, "sender_strategies")
     route_knowledge_cfg = _get_value(config, "route_knowledge")
@@ -537,6 +539,17 @@ def build_application_settings(config: Any) -> ApplicationSettings:
             ),
             max_retries=max(
                 0, int(_get_value(route_knowledge_cfg, "max_retries", 3) or 3)
+            ),
+        ),
+        bilibili=BilibiliSettings(
+            video_enabled=bool(_get_value(bilibili_cfg, "video_enabled", True)),
+            dedup_hours=max(
+                0, int(_get_value(bilibili_cfg, "dedup_hours", 24) or 0)
+            ),
+            cookie=str(_get_value(bilibili_cfg, "cookie", "") or "").strip(),
+            qn=max(16, int(_get_value(bilibili_cfg, "qn", 32) or 32)),
+            max_videos_per_entry=max(
+                1, int(_get_value(bilibili_cfg, "max_videos_per_entry", 3) or 3)
             ),
         ),
     )
