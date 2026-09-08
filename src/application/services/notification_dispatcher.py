@@ -1653,6 +1653,7 @@ class NotificationDispatcher:
             or self._bilibili_store is None
             or self._bilibili_resolver is None
         ):
+            logger.debug("[bilibili] augment 未启用，跳过")
             return normalized_media
         if raw_entry is None:
             return normalized_media
@@ -1666,6 +1667,11 @@ class NotificationDispatcher:
                 getattr(raw_entry, "link", ""),
             )
             if part
+        )
+        logger.info(
+            "[bilibili] augment 进入: text_len=%s, has_bv=%s",
+            len(text),
+            "BV" in text,
         )
         if "BV" not in text:
             return normalized_media
