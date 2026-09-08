@@ -830,8 +830,11 @@ class NotificationDispatcher:
                         stats["skipped"] += 1
                         continue
                     effective_send_mode = self._resolve_send_mode(sub, user)
+                    # 媒体必须用 augment 后的 normalized_media（含 B站视频等
+                    # 运行时增强项），原始 media_items 不含这些增强媒体。
+                    # normalize_media_items 按 URL 去重，重复合并无副作用。
                     effective_media_urls = media_urls
-                    effective_media_items = media_items
+                    effective_media_items = normalized_media
                     effective_layout = (
                         list(processed_entry.layout)
                         if processed_entry is not None and processed_entry.layout
