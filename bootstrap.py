@@ -460,6 +460,7 @@ def _configure_message_senders(app_settings: ApplicationSettings) -> None:
         gc_interval_seconds=app_settings.media_platform_limits.cache_gc_interval_seconds,
         gc_grace_seconds=app_settings.media_platform_limits.cache_gc_grace_seconds,
     )
+    MediaDownloader.configure_max_download_bytes(app_settings.media.max_video_size_mb)
     TableImageRenderer.configure_cache(
         enabled=app_settings.media_platform_limits.cache_enabled,
         ttl_seconds=app_settings.media_platform_limits.cache_ttl_seconds,
@@ -472,7 +473,7 @@ def _configure_message_senders(app_settings: ApplicationSettings) -> None:
         "sender behavior configured: gif_transcode=%s, gif_profile=%s, "
         "video_transcode=%s, "
         "ffmpeg_source=%s, image_relay=%s, media_relay=%s, "
-        "napcat_stream=%s, table_to_image=%s",
+        "napcat_stream=%s, table_to_image=%s, max_video_size_mb=%s",
         app_settings.media.gif_transcode,
         app_settings.media.gif_transcode_profile,
         app_settings.media.video_transcode,
@@ -481,6 +482,7 @@ def _configure_message_senders(app_settings: ApplicationSettings) -> None:
         app_settings.media.media_relay_base_url or "(none)",
         app_settings.media_platform_limits.onebot_napcat_stream_mode,
         app_settings.media.table_to_image,
+        app_settings.media.max_video_size_mb or "(unlimited)",
     )
 
 

@@ -7,6 +7,8 @@ from enum import Enum, IntEnum
 INHERIT_VALUE = -100
 MEDIA_CACHE_TTL_SECONDS_DEFAULT = 15 * 60
 MEDIA_CACHE_TTL_SECONDS_MIN = 60
+# 单文件下载大小上限（MB），0 = 不限制
+MAX_VIDEO_SIZE_MB_DEFAULT = 500
 
 
 class UserState(IntEnum):

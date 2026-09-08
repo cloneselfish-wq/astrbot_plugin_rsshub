@@ -206,6 +206,17 @@
           "step": 1
         }
       },
+      "max_video_size_mb": {
+        "type": "int",
+        "description": "单文件下载大小上限（MB）",
+        "hint": "所有推送源的视频/媒体下载通用限额，超过则不下载、推送中仅保留链接；0 表示不限制",
+        "default": 500,
+        "slider": {
+          "min": 0,
+          "max": 4096,
+          "step": 50
+        }
+      },
       "cache_enabled": {
         "type": "bool",
         "description": "启用媒体与转码缓存",

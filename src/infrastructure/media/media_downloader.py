@@ -20,6 +20,7 @@ from astrbot.core.utils.http_ssl import build_tls_connector
 from ...shared.constants import (
     GIF_COMPRESS_TARGET_MAX_BYTES,
     GIF_TRANSCODE_PROFILE_COMPATIBILITY,
+    MAX_VIDEO_SIZE_MB_DEFAULT,
     MEDIA_CACHE_TTL_SECONDS_DEFAULT,
 )
 from ..utils import get_plugin_cache_dir
@@ -39,6 +40,26 @@ from ..utils.media_type_detector import (
 )
 
 logger = get_logger()
+
+_MEDIA_STREAM_CHUNK_BYTES = 1024 * 1024
+_MEDIA_DETECT_HEAD_BYTES = 256 * 1024
+
+
+class MediaTooLargeError(RuntimeError):
+    """媒体体积超过配置的下载大小上限。
+
+    继承 RuntimeError：上层调用方按普通下载失败降级处理
+    （不发媒体、保留文字与链接），无需感知具体类型。
+    """
+
+    def __init__(self, url: str, size_bytes: int, limit_bytes: int) -> None:
+        self.url = url
+        self.size_bytes = size_bytes
+        self.limit_bytes = limit_bytes
+        super().__init__(
+            f"media exceeds size limit: url={url}, "
+            f"size={size_bytes} bytes, limit={limit_bytes} bytes"
+        )
 
 _MEDIA_FORMAT_SUFFIXES = MEDIA_TYPE_SUFFIXES
 _MEDIA_REQUEST_HEADERS: dict[str, str] = {
@@ -98,6 +119,8 @@ class MediaDownloader:
 
     _CACHE_ENABLED: bool = True
     _CACHE_TTL_SECONDS: int = MEDIA_CACHE_TTL_SECONDS_DEFAULT
+    # 单文件下载大小上限（字节），0 表示不限制；默认 500MB
+    _MAX_DOWNLOAD_BYTES: int = MAX_VIDEO_SIZE_MB_DEFAULT * 1024 * 1024
     _CACHE_GC_INTERVAL_SECONDS: int = 5 * 60
     _CACHE_GC_GRACE_SECONDS: int = 10 * 60
     _CACHE_MEDIA_SUFFIXES: tuple[str, ...] = (
@@ -133,6 +156,14 @@ class MediaDownloader:
         cls._CACHE_TTL_SECONDS = max(1, int(ttl_seconds))
         cls._CACHE_GC_INTERVAL_SECONDS = max(1, int(gc_interval_seconds))
         cls._CACHE_GC_GRACE_SECONDS = max(0, int(gc_grace_seconds))
+
+    @classmethod
+    def configure_max_download_bytes(cls, max_mb: int) -> None:
+        """配置单文件下载大小上限（MB）；0 或负数表示不限制。"""
+        mb = int(max_mb)
+        cls._MAX_DOWNLOAD_BYTES = (
+            max(1, mb) * 1024 * 1024 if mb > 0 else 0
+        )
 
     def __init__(self, cache_dir: Path | None = None) -> None:
         if cache_dir is None:
@@ -241,30 +272,10 @@ class MediaDownloader:
                                 f"download failed: status={resp.status}, "
                                 f"url={candidate_url}{header_detail}"
                             )
-                        data = await resp.read()
-                        if not data:
-                            raise RuntimeError(
-                                f"download failed: empty response, url={candidate_url}"
-                            )
-                        detection = detect_media_bytes(data)
-                        if detection.suffix == ".bin":
-                            detection = detect_media_hint(
-                                url=candidate_url,
-                                content_type=resp.headers.get("Content-Type"),
-                            )
-                        suffix = detection.suffix or ".bin"
-
-                    fd, tmp_name = tempfile.mkstemp(
-                        prefix="rsshub_media_",
-                        suffix=suffix,
-                    )
-                    try:
-                        with os.fdopen(fd, "wb") as fp:
-                            fp.write(data)
-                    except Exception:
-                        Path(tmp_name).unlink(missing_ok=True)
-                        raise
-                    return Path(tmp_name)
+                        return await self._stream_response_to_temp(resp, candidate_url)
+                except MediaTooLargeError:
+                    # 体积超限：候选 URL 是同一媒体的变体，无需再试，直接上抛降级
+                    raise
                 except Exception as ex:
                     last_err = ex
                     logger.warning(
@@ -282,6 +293,45 @@ class MediaDownloader:
                 f"last_error={last_err!r}"
             ) from last_err
         raise RuntimeError(f"download failed for all candidates, url={url}")
+
+    async def _stream_response_to_temp(self, resp: aiohttp.ClientResponse, url: str) -> Path:
+        """把响应体流式写入临时文件，边写边检查大小上限。
+
+        相比一次性 read() 全量进内存，内存峰值从文件大小降为单个分块，
+        并能在 Content-Length 预检/累计写入两个层面及时中止超限下载。
+        """
+        limit = self._MAX_DOWNLOAD_BYTES
+        if limit and resp.content_length is not None and resp.content_length > limit:
+            raise MediaTooLargeError(url, resp.content_length, limit)
+
+        head = await resp.content.read(_MEDIA_DETECT_HEAD_BYTES)
+        if not head:
+            raise RuntimeError(f"download failed: empty response, url={url}")
+        detection = detect_media_bytes(head)
+        if detection.suffix == ".bin":
+            detection = detect_media_hint(
+                url=url,
+                content_type=resp.headers.get("Content-Type"),
+            )
+        suffix = detection.suffix or ".bin"
+
+        total = len(head)
+        fd, tmp_name = tempfile.mkstemp(prefix="rsshub_media_", suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as fp:
+                fp.write(head)
+                while True:
+                    chunk = await resp.content.read(_MEDIA_STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if limit and total > limit:
+                        raise MediaTooLargeError(url, total, limit)
+                    fp.write(chunk)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+        return Path(tmp_name)
 
     @staticmethod
     def safe_unlink(path: Path | None) -> None:

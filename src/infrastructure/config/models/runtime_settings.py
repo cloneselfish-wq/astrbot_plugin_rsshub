@@ -151,6 +151,8 @@ class MediaSettings:
     image_relay_base_url: str = ""
     media_relay_base_url: str = ""
     media_download_concurrency: int = 1
+    # 单文件下载大小上限（MB），0 = 不限制；默认 500MB
+    max_video_size_mb: int = 500
     table_to_image: bool = True
     video_transcode: bool = False
     video_transcode_timeout: int = 120

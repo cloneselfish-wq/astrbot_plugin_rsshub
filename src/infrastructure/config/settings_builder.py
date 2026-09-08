@@ -6,6 +6,7 @@ from typing import Any
 
 from ..utils.proxy_bypass import DEFAULT_NO_PROXY_PATTERNS
 from ...shared.constants import (
+    MAX_VIDEO_SIZE_MB_DEFAULT,
     MEDIA_CACHE_TTL_SECONDS_DEFAULT,
     MEDIA_CACHE_TTL_SECONDS_MIN,
     ONEBOT_NAPCAT_STREAM_MODE_DEFAULT,
@@ -459,6 +460,11 @@ def build_application_settings(config: Any) -> ApplicationSettings:
             ).strip(),
             media_download_concurrency=max(
                 1, int(_get_value(media_cfg, "media_download_concurrency", 1) or 1)
+            ),
+            # 0 = 不限制；缺失时回退默认 500
+            max_video_size_mb=max(
+                0,
+                int(_get_value(media_cfg, "max_video_size_mb", MAX_VIDEO_SIZE_MB_DEFAULT) or 0),
             ),
             table_to_image=bool(_get_value(media_cfg, "table_to_image", True)),
             video_transcode=bool(_get_value(media_cfg, "video_transcode", False)),
